@@ -3,7 +3,7 @@
 // for the app running FocusGuard (Terminal/iTerm/VS Code in dev, or FocusGuard itself).
 import { execFile } from 'node:child_process';
 
-export type FrontWindow = { app: string; pid: number; title: string; url: string };
+export type FrontWindow = { app: string; pid: number; title: string; url: string; noteId?: string };
 
 const SEP = '\u001f';
 const CHROMIUM = ['Google Chrome', 'Google Chrome Canary', 'Arc', 'Brave Browser', 'Microsoft Edge', 'Chromium', 'Vivaldi', 'Opera'];
@@ -49,20 +49,25 @@ async function browserUrl(app: string): Promise<string> {
 
 // Apple Notes keeps its window title as "Notes" for every note; ask it for the selected note.
 let notesScriptingWorks = true;
-async function selectedNoteName(): Promise<string> {
-  if (!notesScriptingWorks) return '';
+async function selectedNote(): Promise<{ name: string; id: string }> {
+  if (!notesScriptingWorks) return { name: '', id: '' };
   try {
-    return await osa(`tell application "Notes"
+    const out = await osa(`tell application "Notes"
   try
     set s to selection
-    if (count of s) > 0 then return name of item 1 of s
+    if (count of s) > 0 then
+      set n to item 1 of s
+      return (name of n) & (ASCII character 31) & (id of n)
+    end if
   end try
 end tell
 return ""`, 1500);
+    const [name = '', id = ''] = out.split(SEP);
+    return { name, id };
   } catch (err: any) {
     // Automation not allowed for Notes, or this macOS has no Notes selection: stop asking.
     if (/-1743|not authori[sz]ed|-1728|can.t get selection/i.test(String(err?.message))) notesScriptingWorks = false;
-    return '';
+    return { name: '', id: '' };
   }
 }
 
@@ -71,14 +76,26 @@ export async function getFrontWindow(): Promise<FrontWindow> {
   const [app = '', pid = '0', title = ''] = out.split(SEP);
   const url = await browserUrl(app);
   if (app === 'Notes') {
-    const note = await selectedNoteName();
-    if (note) return { app, pid: Number(pid), title: note, url };
+    const note = await selectedNote();
+    if (note.name) return { app, pid: Number(pid), title: note.name, url, noteId: note.id || undefined };
   }
   return { app, pid: Number(pid), title, url };
 }
 
 // Bring a window back: the app by pid, and for browsers the exact tab by URL.
-export async function activateWindow(w: { app: string; pid: number; url: string }): Promise<void> {
+export async function activateWindow(w: { app: string; pid: number; url: string; noteId?: string }): Promise<void> {
+  // A specific Apple Note: open that exact note, not just the Notes app.
+  if (w.app === 'Notes' && w.noteId) {
+    try {
+      await osa(`tell application "Notes"
+  show note id ${q(w.noteId)}
+  activate
+end tell`, 4000);
+      return;
+    } catch (err: any) {
+      console.error('[go-back] could not open the note:', err?.message ?? err);
+    }
+  }
   if (w.url && CHROMIUM.includes(w.app)) {
     await osa(`
 tell application ${q(w.app)}

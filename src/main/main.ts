@@ -31,8 +31,15 @@ const pidByKey = new Map<string, number>();
 let baselineFp: Uint8Array | null = null;
 let lastFpAt = 0;
 const FP_INTERVAL_MS = 2000;
+const SETTLE_MS = 2000; // a window must stay unchanged this long before it is judged
+const SETTLE_BLOCKED_MS = 700; // shorter while the overlay is up, so going back clears it fast
+let candidateKey = '';
+let candidateSince = 0;
+let contentCandidate: Uint8Array | null = null;
+let contentSince = 0;
 const FP_CHANGE = 0.02; // share of pixels that must change to count as different content (another note)
-let lastOnTask: { app: string; pid: number; url: string; title: string } | undefined;
+let lastOnTask: { app: string; pid: number; url: string; title: string; noteId?: string } | undefined;
+const noteIdByKey = new Map<string, string>(); // Apple Notes: window key -> note id, for Back
 
 const keyOf = (w: { app: string; title: string; url: string }) => `${w.app}\u0001${w.title}\u0001${w.url}`;
 
@@ -331,22 +338,46 @@ async function tick() {
   if (w.pid === process.pid || !w.app) return; // ignore our own windows
   const key = keyOf(w);
   pidByKey.set(key, w.pid);
+  if (w.noteId) noteIdByKey.set(key, w.noteId);
   let relog = false;
+  const now = Date.now();
   if (key !== lastKey) {
-    lastKey = key;
-    relog = true;
-    baselineFp = null;
-  } else if (isContentApp(w.app) && Date.now() - lastFpAt > (Date.now() < graceUntil ? 1000 : FP_INTERVAL_MS) && (!openIntervention(conn, s.id) || Date.now() < graceUntil)) {
-    // Same window title in a notes/docs/chat app: did the content change (another note)?
-    lastFpAt = Date.now();
-    const latest = conn.db.activityEvent.id.find(s.latestEventId);
-    const fp = await screenFingerprint();
-    if (fp && latest && latest.verdict !== 'pending') {
-      if (!baselineFp) baselineFp = fp;
-      else if (fingerprintDiff(baselineFp, fp) > FP_CHANGE) {
-        console.log(`[watcher] content changed inside ${w.app}; asking the judge again`);
-        baselineFp = fp;
-        relog = true;
+    // Only judge a window once it has stayed put for SETTLE_MS (passing through the Notes list
+    // on the way from note A to note B doesn't count). Shorter while blocked, so going back is quick.
+    const settle = openIntervention(conn, s.id) ? SETTLE_BLOCKED_MS : SETTLE_MS;
+    if (key !== candidateKey) {
+      candidateKey = key;
+      candidateSince = now;
+    } else if (now - candidateSince >= settle) {
+      lastKey = key;
+      relog = true;
+      baselineFp = null;
+      contentCandidate = null;
+    }
+  } else {
+    candidateKey = key;
+    const interval = contentCandidate || now < graceUntil ? 1000 : FP_INTERVAL_MS;
+    if (isContentApp(w.app) && now - lastFpAt > interval && (!openIntervention(conn, s.id) || now < graceUntil)) {
+      // Same window title in a notes/docs/chat app: did the content change (another note)?
+      lastFpAt = now;
+      const latest = conn.db.activityEvent.id.find(s.latestEventId);
+      const fp = await screenFingerprint();
+      if (fp && latest && latest.verdict !== 'pending') {
+        if (!baselineFp) baselineFp = fp;
+        else if (contentCandidate) {
+          if (fingerprintDiff(contentCandidate, fp) > FP_CHANGE) {
+            contentCandidate = fp; // still changing: wait for it to settle
+            contentSince = now;
+          } else if (now - contentSince >= SETTLE_MS) {
+            console.log(`[watcher] content changed inside ${w.app}; asking the judge again`);
+            baselineFp = fp;
+            contentCandidate = null;
+            relog = true;
+          }
+        } else if (fingerprintDiff(baselineFp, fp) > FP_CHANGE) {
+          contentCandidate = fp;
+          contentSince = now;
+        }
       }
     }
   }
@@ -385,7 +416,7 @@ function onDbChange() {
   if (s) {
     const latest = conn.db.activityEvent.id.find(s.latestEventId);
     if (latest && latest.verdict === 'on_task') {
-      lastOnTask = { app: latest.app, title: latest.title, url: latest.url, pid: pidByKey.get(keyOf(latest)) ?? 0 };
+      lastOnTask = { app: latest.app, title: latest.title, url: latest.url, pid: pidByKey.get(keyOf(latest)) ?? 0, noteId: noteIdByKey.get(keyOf(latest)) };
     }
   }
   const iv = s ? openIntervention(conn, s.id) : undefined;
@@ -583,7 +614,7 @@ function hideOverlayTemporarily() {
       for (const w of overlays) if (!w.isDestroyed()) w.setAlwaysOnTop(true, 'screen-saver');
       enforceFocus();
     }
-  }, 2500);
+  }, 3500);
 }
 
 // ---------------- App lifecycle ----------------

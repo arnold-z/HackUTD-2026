@@ -12,7 +12,9 @@ function render(st) {
   const site = iv.distraction.split(' — ')[0];
   $('why').textContent = iv.reason ? `${site}: ${iv.reason}` : `You switched to ${site}.`;
   const b = st.backTo;
-  $('back').textContent = b ? `Back to ${b.url ? host(b.url) || b.app : b.app}` : 'Back to work';
+  // Name the exact note or document when the app holds many (Notes, Pages, Word…).
+  const doc = !b?.url && b?.title && b.title !== b.app ? `“${b.title.length > 32 ? b.title.slice(0, 31) + '…' : b.title}”` : '';
+  $('back').textContent = b ? `Back to ${b.url ? host(b.url) || b.app : doc || b.app}` : 'Back to work';
 
   const elapsed = (Date.now() - iv.shownMs) / 1000;
   const arc = $('dialArc');

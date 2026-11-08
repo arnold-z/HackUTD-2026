@@ -6,13 +6,18 @@
 // Every tool call is written to agent_trace so the UI can show the agent reasoning live.
 import type { Conn } from './db.js';
 import { micros, sessionEvents, sessionInterventions, sessionRules } from './db.js';
-import { chat, extractJson, type ChatMessage, type ToolSpec } from './llm.js';
+import { chat, extractJson, hasImages, withoutImages, type ChatMessage, type ToolSpec } from './llm.js';
 import { computeMetrics, type Metrics } from './metrics.js';
 import { sendText } from './photon.js';
 
 type Job = NonNullable<ReturnType<Conn['db']['agentJob']['id']['find']>>;
 type Session = NonNullable<ReturnType<Conn['db']['session']['id']['find']>>;
 type Event = NonNullable<ReturnType<Conn['db']['activityEvent']['id']['find']>>;
+
+// Apps whose window title doesn't say what's open (one "Notes" title for every note): the Judge
+// looks at a screenshot. Keep in sync with CONTENT_APPS in server/src/index.ts.
+export const CONTENT_APPS = ['notes', 'pages', 'preview', 'textedit', 'microsoft word', 'obsidian', 'notion', 'bear', 'keynote', 'numbers', 'mail', 'messages', 'slack', 'discord', 'reminders'];
+export const isContentApp = (app: string) => CONTENT_APPS.includes(app.trim().toLowerCase());
 
 const CONFIDENCE_FLOOR = 0.6; // strict mode: below this, an off-task call becomes on-task
 const KNOWN_DISTRACTIONS = [
@@ -33,7 +38,7 @@ export class Agent {
   private msgLane: Promise<void> = Promise.resolve();
   private seen = new Set<string>();
 
-  constructor(private conn: Conn, private onChange: () => void) {}
+  constructor(private conn: Conn, private onChange: () => void, private capture?: () => Promise<string | null>) {}
 
   start() {
     this.conn.db.agentJob.onInsert((_ctx, job) => this.enqueue(job));
@@ -188,6 +193,14 @@ Rules:
     {
       type: 'function',
       function: {
+        name: 'capture_window',
+        description: "Take a screenshot of the user's screen to see what is actually open (which note, document, chat or page). Use when the window title doesn't reveal the content.",
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: 'function',
+      function: {
         name: 'lookup_rules',
         description: 'List the learned allow/block rules for this session.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -251,7 +264,8 @@ Guidelines:
 - Tutorials, docs, references, search results, course sites, code, notes, AI assistants, and messages about the goal topic are on_task.
 - Social feeds, entertainment, gaming, shopping, unrelated videos/news are off_task.
 - System windows (Finder, System Settings, a file dialog) and anything needed to do the work are on_task.
-- Strict blocking hurts when wrong: if genuinely unsure, choose on_task with low confidence.`;
+- Strict blocking hurts when wrong: if genuinely unsure, choose on_task with low confidence.
+- When a screenshot is provided, judge by the content that is visible (the open note, document, chat or page), not by the app. A note about an unrelated topic is off_task even inside a notes app. A screenshot showing only a desktop wallpaper means screen access is off: ignore it.`;
     const user = JSON.stringify({
       goal: s.goal,
       what_on_task_looks_like: this.profileSummary(s),
@@ -261,15 +275,39 @@ Guidelines:
       { role: 'system', content: system },
       { role: 'user', content: `New window to judge:\n${user}` },
     ];
+    // For apps whose title hides the content, look at the screen up front.
+    if (isContentApp(ev.app) && this.capture) {
+      const shot = await this.capture();
+      await this.trace(job, null, 'capture_window', JSON.stringify({ app: ev.app, auto: true }), shot ? `screenshot attached (${Math.round((shot.length * 3) / 4 / 1024)} KB)` : 'no screenshot (grant Screen Recording permission)');
+      if (!shot) {
+        messages[1] = {
+          role: 'user',
+          content: `New window to judge:\n${user}\nNo screenshot is available (screen access is off), so you cannot see which note or document is open. An app title alone is not evidence of being off task: record on_task with confidence 0.3 unless the title itself names something unrelated to the goal.`,
+        };
+      } else {
+        messages[1] = {
+          role: 'user',
+          content: [
+            { type: 'text', text: `New window to judge:\n${user}\nThe title doesn't show what's open, so here is a screenshot of the screen. Judge by its content.` },
+            { type: 'image_url', image_url: { url: shot } },
+          ],
+        };
+      }
+    }
 
     let decided = false;
     for (let turn = 0; turn < 5 && !decided; turn++) {
       let r;
       try {
-        r = await this.llm(messages, { tools: this.judgeTools, maxTokens: 600 });
+        r = await this.llm(messages, { tools: this.judgeTools, maxTokens: 600, timeoutMs: hasImages(messages) ? 45_000 : 25_000 });
       } catch (err: any) {
         await this.trace(job, null, 'nemotron.error', '', String(err?.message ?? err));
-        break;
+        if (!hasImages(messages)) break;
+        // Endpoint rejected or timed out on the image: retry once with text only.
+        const textOnly = withoutImages(messages);
+        messages.splice(0, messages.length, ...textOnly);
+        await this.trace(job, null, 'retry_without_screenshot', '', 'continuing from the title only');
+        continue;
       }
       if (r.toolCalls.length) {
         messages.push({ role: 'assistant', content: r.content || null, tool_calls: r.toolCalls });
@@ -283,6 +321,9 @@ Guidelines:
           const result = await this.execJudgeTool(job, s, ev, call.function.name, args);
           await this.trace(job, null, call.function.name, JSON.stringify(args), result.text);
           messages.push({ role: 'tool', tool_call_id: call.id, content: result.text });
+          if (result.image) {
+            messages.push({ role: 'user', content: [{ type: 'text', text: 'Screenshot of the current screen:' }, { type: 'image_url', image_url: { url: result.image } }] });
+          }
           if (result.final) decided = true;
         }
       } else {
@@ -309,7 +350,7 @@ Guidelines:
     }
   }
 
-  private async execJudgeTool(job: Job, s: Session, ev: Event, name: string, args: any): Promise<{ text: string; final?: boolean }> {
+  private async execJudgeTool(job: Job, s: Session, ev: Event, name: string, args: any): Promise<{ text: string; final?: boolean; image?: string }> {
     switch (name) {
       case 'get_session_context': {
         const recent = sessionEvents(this.conn, s.id)
@@ -321,6 +362,11 @@ Guidelines:
       case 'fetch_page_summary': {
         const url = String(args.url || ev.url || '');
         return { text: url ? await fetchPageSummary(url) : 'no url for this window' };
+      }
+      case 'capture_window': {
+        if (!this.capture) return { text: 'screen capture is not available' };
+        const shot = await this.capture();
+        return shot ? { text: 'Screenshot captured; it follows as an image.', image: shot } : { text: 'Screenshot unavailable (Screen Recording permission not granted). Judge from the title.' };
       }
       case 'lookup_rules': {
         const rules = sessionRules(this.conn, s.id).map((r) => `${r.verdict} ${r.kind}:${r.pattern}`);

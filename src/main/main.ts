@@ -1,11 +1,12 @@
 // FocusGuard Electron main process.
-import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences, shell, desktopCapturer } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, config } from './config.js';
 import { connect, activeSession, latestSession, micros, openIntervention, sessionEvents, sessionRules, type Conn } from './db.js';
 import { getFrontWindow, activateWindow, type FrontWindow } from './mac.js';
-import { Agent } from './agent.js';
+import { Agent, isContentApp } from './agent.js';
+import { captureScreenForModel, screenFingerprint, fingerprintDiff, screenAccess } from './capture.js';
 import { initPhoton, photonStatus, photonError, stopPhoton } from './photon.js';
 
 const RENDERER = join(ROOT, 'renderer');
@@ -26,6 +27,11 @@ let lastKey = '';
 let lastLoggedAt = 0;
 let lastFront: FrontWindow | undefined;
 const pidByKey = new Map<string, number>();
+// In-window change detection for content apps (switching notes keeps the same title).
+let baselineFp: Uint8Array | null = null;
+let lastFpAt = 0;
+const FP_INTERVAL_MS = 2000;
+const FP_CHANGE = 0.02; // share of pixels that must change to count as different content (another note)
 let lastOnTask: { app: string; pid: number; url: string; title: string } | undefined;
 
 const keyOf = (w: { app: string; title: string; url: string }) => `${w.app}\u0001${w.title}\u0001${w.url}`;
@@ -62,6 +68,28 @@ function accentColor(): string {
   } catch {
     return '#007aff';
   }
+}
+
+// ---------------- Permissions ----------------
+// macOS applies Screen Recording only to a freshly started app, so remember the launch state.
+const SETTINGS = {
+  screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+  accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+  automation: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
+} as const;
+let screenAtLaunch = '';
+function permissions() {
+  if (process.platform !== 'darwin') return null;
+  const screenNow = screenAccess();
+  if (!screenAtLaunch) screenAtLaunch = screenNow;
+  const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+  const automationBlocked = /automation|-1743|not authori[sz]ed to send apple events/i.test(watcherError);
+  return {
+    appName: app.isPackaged ? 'FocusGuard' : 'Electron (and the Terminal you launched from)',
+    screen: screenNow === 'granted' ? (screenAtLaunch === 'granted' ? 'ok' : 'restart') : 'missing',
+    accessibility: accessibility ? 'ok' : 'missing',
+    automation: automationBlocked ? 'missing' : 'ok',
+  };
 }
 
 // ---------------- Windows ----------------
@@ -102,33 +130,91 @@ function showMain() {
 }
 
 // ---------------- Menu bar item ----------------
+// A colored status dot plus "On task 12:34". Every window switch plays a short sweep animation,
+// even on-task to on-task; while the agent is still judging, an orange ring spins.
 let tray: Tray | undefined;
 let trayMenuKey = '';
+let trayAnimKey = '';
+let trayAnimTimer: NodeJS.Timeout | undefined;
+let traySettled: string = 'idleTemplate';
+const trayImages = new Map<string, Electron.NativeImage>();
+function trayImage(name: string) {
+  let img = trayImages.get(name);
+  if (!img) {
+    img = nativeImage.createFromPath(join(ROOT, 'build', 'tray', `${name}.png`)); // picks up @2x automatically
+    if (name.endsWith('Template')) img.setTemplateImage(true);
+    trayImages.set(name, img);
+  }
+  return img;
+}
+
 function createTray() {
-  tray = new Tray(nativeImage.createEmpty());
+  tray = new Tray(trayImage('idleTemplate'));
   tray.setToolTip('FocusGuard');
   tray.on('click', () => showMain());
   updateTray();
 }
 
+function playTray(state: 'on' | 'off' | 'pending') {
+  if (trayAnimTimer) clearInterval(trayAnimTimer);
+  let frame = 0;
+  if (state === 'pending') {
+    traySettled = 'spin0';
+    trayAnimTimer = setInterval(() => {
+      if (!tray || tray.isDestroyed()) return;
+      tray.setImage(trayImage(`spin${frame++ % 8}`));
+    }, 90);
+    return;
+  }
+  traySettled = state;
+  trayAnimTimer = setInterval(() => {
+    if (!tray || tray.isDestroyed()) return;
+    frame++;
+    if (frame <= 6) tray.setImage(trayImage(`${state}-sweep${frame}`));
+    else {
+      tray.setImage(trayImage(state));
+      clearInterval(trayAnimTimer);
+      trayAnimTimer = undefined;
+    }
+  }, 45);
+}
+
 function updateTray() {
   if (!tray || tray.isDestroyed()) return;
   const s = conn ? activeSession(conn) : undefined;
-  let title = '◎ FocusGuard';
+  const latest = s && conn ? conn.db.activityEvent.id.find(s.latestEventId) : undefined;
+  let title = ' FocusGuard';
+  let windowLabel = '';
   if (s) {
     const left = s.minutes * 60000 - (Date.now() - micros(s.startedAt));
     const sec = Math.max(0, Math.floor(left / 1000));
-    const clock = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
-    title = openIntervention(conn!, s.id) ? `● Off task · ${clock}` : `◎ ${clock}`;
+    const clock = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    const blocked = !!openIntervention(conn!, s.id);
+    const state: 'on' | 'off' | 'pending' = blocked || latest?.verdict === 'off_task' ? 'off' : latest?.verdict === 'pending' ? 'pending' : 'on';
+    title = ` ${state === 'on' ? 'On task' : state === 'off' ? 'Off task' : 'Checking'}  ${clock}`;
+    windowLabel = latest ? `${latest.app}${latest.title && latest.title !== latest.app ? ': ' + latest.title.slice(0, 50) : ''}` : '';
+    // A new window (or a new verdict for it) replays the transition.
+    const animKey = `${s.latestEventId}:${state}`;
+    if (animKey !== trayAnimKey) {
+      trayAnimKey = animKey;
+      playTray(state);
+    }
+  } else if (trayAnimKey !== 'idle') {
+    trayAnimKey = 'idle';
+    if (trayAnimTimer) clearInterval(trayAnimTimer);
+    trayAnimTimer = undefined;
+    traySettled = 'idleTemplate';
+    tray.setImage(trayImage('idleTemplate'));
   }
-  tray.setTitle(title);
-  const menuKey = s ? `active:${s.id}` : 'idle';
+  tray.setTitle(title, { fontType: 'monospacedDigit' });
+  const menuKey = s ? `active:${s.id}:${windowLabel}` : 'idle';
   if (menuKey === trayMenuKey) return;
   trayMenuKey = menuKey;
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: s ? `Focusing: ${s.goal.slice(0, 40)}` : 'No focus session', enabled: false },
-      { type: 'separator' },
+      { label: s ? `Focusing on: ${s.goal.slice(0, 40)}` : 'No focus session', enabled: false },
+      ...(windowLabel ? [{ label: `Now: ${windowLabel}`, enabled: false }] : []),
+      { type: 'separator' as const },
       { label: 'Open FocusGuard', click: () => showMain() },
       { label: s ? 'Quit (end the session first)' : 'Quit FocusGuard', enabled: !s, click: () => quitApp() },
     ])
@@ -214,7 +300,7 @@ const overlayVisible = () => overlays.some((w) => !w.isDestroyed() && w.isVisibl
 
 // While an intervention is open, any other window that isn't judged on-task gets covered again.
 function enforceFocus() {
-  if (!conn || !overlayVisible()) return;
+  if (!conn || !overlayVisible() || Date.now() < graceUntil) return;
   const s = activeSession(conn);
   if (!s || !openIntervention(conn, s.id)) return;
   if (!lastFront || lastFront.pid === process.pid) return;
@@ -245,8 +331,26 @@ async function tick() {
   if (w.pid === process.pid || !w.app) return; // ignore our own windows
   const key = keyOf(w);
   pidByKey.set(key, w.pid);
+  let relog = false;
   if (key !== lastKey) {
     lastKey = key;
+    relog = true;
+    baselineFp = null;
+  } else if (isContentApp(w.app) && Date.now() - lastFpAt > (Date.now() < graceUntil ? 1000 : FP_INTERVAL_MS) && (!openIntervention(conn, s.id) || Date.now() < graceUntil)) {
+    // Same window title in a notes/docs/chat app: did the content change (another note)?
+    lastFpAt = Date.now();
+    const latest = conn.db.activityEvent.id.find(s.latestEventId);
+    const fp = await screenFingerprint();
+    if (fp && latest && latest.verdict !== 'pending') {
+      if (!baselineFp) baselineFp = fp;
+      else if (fingerprintDiff(baselineFp, fp) > FP_CHANGE) {
+        console.log(`[watcher] content changed inside ${w.app}; asking the judge again`);
+        baselineFp = fp;
+        relog = true;
+      }
+    }
+  }
+  if (relog) {
     lastLoggedAt = Date.now();
     try {
       await conn.reducers.logActivity({ sessionId: s.id, app: w.app, title: w.title.slice(0, 300), url: w.url.slice(0, 1000) });
@@ -276,6 +380,7 @@ function onDbChange() {
     showMain();
   }
   lastActiveId = s?.id;
+  updateTray();
   // Track the last on-task window for the "Back to …" button.
   if (s) {
     const latest = conn.db.activityEvent.id.find(s.latestEventId);
@@ -311,6 +416,7 @@ function snapshot() {
     llm: agent?.status ?? { llm: 'unknown', llmError: '', lastLatencyMs: 0 },
     photon: { status: photonStatus, error: photonError },
     model: config.llmModel,
+    permissions: permissions(),
     accent: accentColor(),
     defaultPhone: config.userPhone,
     endPhrase: END_PHRASE,
@@ -399,7 +505,10 @@ ipcMain.handle('end-session', async (_e, args: { phrase: string }) => {
 
 ipcMain.handle('go-back', async () => {
   const target = lastOnTask;
-  hideOverlayTemporarily();
+  const s = conn ? activeSession(conn) : undefined;
+  const offEvent = s && conn ? conn.db.activityEvent.id.find(s.latestEventId) : undefined;
+  if (offEvent && isContentApp(offEvent.app)) contentGrace();
+  else hideOverlayTemporarily();
   try {
     if (target) await activateWindow(target);
     else showMain();
@@ -410,6 +519,57 @@ ipcMain.handle('go-back', async () => {
 });
 
 ipcMain.handle('get-state', () => snapshot());
+
+ipcMain.handle('open-permission', async (_e, kind: keyof typeof SETTINGS) => {
+  if (kind === 'screen') {
+    // Asking for a capture once makes macOS list this app in Screen Recording settings.
+    try {
+      await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } });
+    } catch {
+      /* ignore */
+    }
+  }
+  if (kind === 'accessibility') systemPreferences.isTrustedAccessibilityClient(true);
+  hideOverlay(); // the settings window must not be hidden behind the overlay
+  await shell.openExternal(SETTINGS[kind] ?? SETTINGS.screen);
+  return true;
+});
+
+ipcMain.handle('restart-app', () => {
+  console.log('[app] restarting to apply permissions');
+  allowQuit = true;
+  destroyOverlays();
+  app.relaunch();
+  app.exit(0);
+});
+
+// Off task inside a notes/docs/chat app: going "back" means opening a different note in the
+// same app, which the overlay would cover. Hide it for a short grace period; the watcher
+// re-judges the new content from a screenshot, and the overlay returns if still off task.
+let graceUntil = 0;
+function contentGrace() {
+  graceUntil = Date.now() + 8000;
+  lastFpAt = 0; // check content on the next tick
+  for (const w of overlays) if (!w.isDestroyed()) w.hide();
+  // Fingerprint the off-task content right away so a quick switch to another note registers.
+  setTimeout(async () => {
+    if (!baselineFp) baselineFp = await screenFingerprint();
+  }, 250);
+  const deadline = Date.now() + 20000;
+  const check = () => {
+    if (!conn) return;
+    const s = activeSession(conn);
+    if (!s || !openIntervention(conn, s.id)) return; // resolved: on task again
+    const latest = conn.db.activityEvent.id.find(s.latestEventId);
+    if ((Date.now() < graceUntil || latest?.verdict === 'pending') && Date.now() < deadline) {
+      setTimeout(check, 1000);
+      return;
+    }
+    graceUntil = 0;
+    showOverlay();
+  };
+  setTimeout(check, 1000);
+}
 
 // Lower the overlay briefly so the restored window can take focus; if the user doesn't
 // land on an on-task window, enforceFocus() raises it again on the next tick.
@@ -451,7 +611,7 @@ app.whenReady().then(() => {
     // One saved identity per server+database, so switching between local and Maincloud just works.
     join(app.getPath('userData'), `stdb-token-${(config.stdbUri + '-' + config.stdbDatabase).replace(/[^a-z0-9]+/gi, '_')}`),
     (c) => {
-      agent = new Agent(c, pushState);
+      agent = new Agent(c, pushState, captureScreenForModel);
       agent.start();
       const tables = [c.db.session, c.db.activityEvent, c.db.intervention, c.db.agentTrace, c.db.agentJob, c.db.relevanceRule, c.db.sessionSummary] as const;
       for (const t of tables) {

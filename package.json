@@ -13,7 +13,7 @@
     "start": "npm run build && electron .",
     "smoke": "npm run build && node dist/smoke.js",
     "typecheck": "tsc --noEmit -p .",
-    "package:mac": "npm run build && electron-packager . FocusGuard --out=release --overwrite --icon=build/icon.icns --app-bundle-id=com.focusguard.app --extend-info=build/Info.extend.plist --ignore=^/server --ignore=^/src --ignore=^/scripts --ignore=^/release --no-asar && codesign --force --deep --sign - release/FocusGuard-darwin-*/FocusGuard.app && echo '\\nBuilt: '$(ls -d release/FocusGuard-darwin-*/FocusGuard.app)",
+    "package:mac": "npm run build && electron-packager . FocusGuard --out=release --overwrite --icon=build/icon.icns --app-bundle-id=com.focusguard.app --extend-info=build/Info.extend.plist --ignore=^/server --ignore=^/src --ignore=^/scripts --ignore=^/release --no-asar && sh scripts/sign-mac.sh && echo '\\nBuilt: '$(ls -d release/FocusGuard-darwin-*/FocusGuard.app)",
     "app": "open release/FocusGuard-darwin-*/FocusGuard.app"
   },
   "dependencies": {

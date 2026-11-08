@@ -48,6 +48,8 @@ function render(st) {
   $('bannerText').textContent = problems.join(' ');
   $('banner').classList.toggle('hidden', problems.length === 0);
 
+  renderPermissions(st.permissions);
+
   if (!phoneTouched && !$('phone').value) $('phone').value = st.defaultPhone || '';
 
   const s = st.session;
@@ -85,7 +87,7 @@ function render(st) {
     $('cTitle').textContent = c.title || c.app;
     $('cSub').textContent = c.url ? `${c.app}, ${host(c.url)}` : c.app;
     const how = c.source === 'rule' ? 'Decided by a learned rule.' : c.source === 'memory' ? 'Seen earlier this session.' : c.source === 'judge' ? `Nemotron, ${Math.round(c.confidence * 100)}% sure.` : '';
-    $('cReason').textContent = c.verdict === 'pending' ? 'The agent is looking into this window.' : [c.reason, how].filter(Boolean).join(' ');
+    $('cReason').textContent = c.verdict === 'pending' ? 'The agent is looking into this window.' : [c.reason && !/[.!?]$/.test(c.reason.trim()) ? c.reason.trim() + '.' : c.reason, how].filter(Boolean).join(' ');
   } else {
     $('cVerdict').className = 'badge pending';
     $('cVerdict').textContent = 'Waiting';
@@ -121,6 +123,39 @@ function render(st) {
   $('rules').innerHTML = s.rules.length
     ? s.rules.map((r) => `<span class="chip ${r.verdict}" title="${r.verdict === 'on_task' ? 'Counts as on task' : 'Counts as off task'}">${esc(r.pattern)}</span>`).join('')
     : '<span class="empty" style="padding:0">Setting up rules from your goal…</span>';
+}
+
+// Permission checker: one row per macOS permission, shown only when something is missing.
+const PERMS = [
+  { key: 'screen', name: 'Screen Recording', why: 'Lets the agent see which note, document or chat is open.' },
+  { key: 'accessibility', name: 'Accessibility', why: 'Reads window titles and switches you back to your work.' },
+  { key: 'automation', name: 'Automation', why: 'Reads the browser tab URL and returns you to the right tab.' },
+];
+let lastPermKey = '';
+function renderPermissions(p) {
+  if (!p) return $('perms').classList.add('hidden');
+  const needs = PERMS.some((x) => p[x.key] !== 'ok');
+  $('perms').classList.remove('hidden'); // always visible, so access can be verified at a glance
+  const key = JSON.stringify(p);
+  if (key === lastPermKey) return;
+  $('permTitle').textContent = needs ? 'FocusGuard needs access' : 'Permissions';
+  lastPermKey = key;
+  const restart = PERMS.some((x) => p[x.key] === 'restart');
+  $('permRows').innerHTML = PERMS.map((x) => {
+    const s = p[x.key];
+    const label = s === 'ok' ? 'On' : s === 'restart' ? 'Restart to apply' : 'Off';
+    // macOS often reports Screen Recording as off until the app restarts, so offer the restart right away.
+    const restartBtn = x.key === 'screen' && s === 'missing' ? '<button class="btn" data-restart>Restart</button>' : '';
+    const btn = s === 'missing' ? `<button class="btn" data-perm="${x.key}">Open settings</button>${restartBtn}` : s === 'restart' ? '<button class="btn primary" data-restart>Restart FocusGuard</button>' : '';
+    return `<div class="row"><div class="main"><div class="title">${x.name}</div><div class="detail">${x.why}</div></div><span class="perm-state ${s}">${label}</span>${btn}</div>`;
+  }).join('');
+  $('permNote').textContent = !needs
+    ? 'Everything FocusGuard needs is turned on.'
+    : restart
+    ? 'macOS applies Screen Recording only after a restart. Your session continues afterwards.'
+    : `In the settings page, turn on ${p.appName}, then click Restart. If it's on but still shows Off after restarting, remove it with − and add it again with +.`;
+  for (const b of $('permRows').querySelectorAll('[data-perm]')) b.addEventListener('click', () => window.fg.openPermission(b.dataset.perm));
+  for (const b of $('permRows').querySelectorAll('[data-restart]')) b.addEventListener('click', () => window.fg.restartApp());
 }
 
 // Length presets

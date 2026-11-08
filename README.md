@@ -38,6 +38,8 @@ The first session will trigger prompts. If window titles don't appear, or the "B
 - **System Settings → Privacy & Security → Accessibility**: enable the terminal you launched from (Terminal, iTerm, or VS Code) and **Electron**.
 - **System Settings → Privacy & Security → Automation**: allow it to control **System Events** and **Google Chrome** (or Safari).
 
+- **System Settings → Privacy & Security → Screen Recording**: enable it too. The agent uses screenshots to see which note, document or chat is open in apps like Notes, Pages, Preview, Word, Notion, Obsidian, Mail, Messages, Slack and Discord, whose window titles don't say. Without it those apps are judged by title only.
+
 Restart `npm start` after changing them. Chrome or Safari is needed for exact tab URLs and switching back to the right tab; other browsers fall back to the window title.
 
 ## Install as a real Mac app
@@ -50,6 +52,12 @@ npm run package:mac    # builds release/FocusGuard-darwin-arm64/FocusGuard.app
 cp -R release/FocusGuard-darwin-*/FocusGuard.app /Applications/
 open /Applications/FocusGuard.app
 ```
+
+**Keep permissions across rebuilds (one-time, 1 minute).** macOS ties permissions to the app's signature. Create a signing certificate once and every build is signed with it:
+
+1. Open **Keychain Access** → menu **Keychain Access → Certificate Assistant → Create a Certificate…**
+2. Name: `FocusGuard Dev`, Identity Type: **Self-Signed Root**, Certificate Type: **Code Signing** → Create.
+3. Run `npm run package:mac`. It prints `Signed with "FocusGuard Dev"`. Reset permissions one last time (`tccutil reset All com.focusguard.app`), grant them, and they now survive rebuilds.
 
 The app reads its settings from the `.env` bundled at build time, so re-run `npm run package:mac` after editing `.env`. Because it's a new app to macOS, grant **FocusGuard** Accessibility and Automation permissions again (System Settings → Privacy & Security). Each rebuild gets a new signature, so you may need to toggle those permissions off and on after rebuilding. Logs: `~/Library/Logs/FocusGuard/main.log`.
 

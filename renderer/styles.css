@@ -179,6 +179,14 @@ textarea { min-height: 76px; resize: none; font-size: 15px; line-height: 1.4; pa
 .empty { padding: 12px 14px; font-size: 12.5px; color: var(--label-3); }
 .debrief { white-space: pre-wrap; padding: 14px 16px; font-size: 13px; line-height: 1.5; }
 
+/* ---------- Permissions ---------- */
+.perms { margin-top: 6px; }
+.perm-state { font-size: 12px; font-weight: 600; }
+.perm-state.ok { color: var(--green); }
+.perm-state.missing { color: var(--red); }
+.perm-state.restart { color: var(--orange); }
+.perm-note { font-size: 12px; color: var(--label-2); margin: 8px 2px 0; }
+
 /* ---------- Overlay ---------- */
 body.overlay { background: color-mix(in srgb, var(--content) 55%, transparent); display: flex; align-items: center; justify-content: center; cursor: default; user-select: none; }
 .ov { text-align: center; max-width: 620px; padding: 0 32px; }

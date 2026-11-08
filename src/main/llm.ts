@@ -3,8 +3,10 @@
 import { config } from './config.js';
 
 export type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
+export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 export type ChatMessage =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | ContentPart[] }
   | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string };
 
@@ -94,4 +96,16 @@ export function extractJson<T = any>(text: string): T | undefined {
     }
   }
   return undefined;
+}
+
+export const hasImages = (messages: ChatMessage[]) =>
+  messages.some((m) => m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'));
+
+// Same conversation with every image replaced by a note (fallback if the endpoint rejects images).
+export function withoutImages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((m) =>
+    m.role === 'user' && Array.isArray(m.content)
+      ? { role: 'user', content: m.content.map((p) => (p.type === 'text' ? p.text : '[screenshot omitted]')).join('\n') }
+      : m
+  );
 }

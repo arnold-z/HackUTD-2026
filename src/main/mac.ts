@@ -47,10 +47,33 @@ async function browserUrl(app: string): Promise<string> {
   return '';
 }
 
+// Apple Notes keeps its window title as "Notes" for every note; ask it for the selected note.
+let notesScriptingWorks = true;
+async function selectedNoteName(): Promise<string> {
+  if (!notesScriptingWorks) return '';
+  try {
+    return await osa(`tell application "Notes"
+  try
+    set s to selection
+    if (count of s) > 0 then return name of item 1 of s
+  end try
+end tell
+return ""`, 1500);
+  } catch (err: any) {
+    // Automation not allowed for Notes, or this macOS has no Notes selection: stop asking.
+    if (/-1743|not authori[sz]ed|-1728|can.t get selection/i.test(String(err?.message))) notesScriptingWorks = false;
+    return '';
+  }
+}
+
 export async function getFrontWindow(): Promise<FrontWindow> {
   const out = await osa(FRONT_SCRIPT);
   const [app = '', pid = '0', title = ''] = out.split(SEP);
   const url = await browserUrl(app);
+  if (app === 'Notes') {
+    const note = await selectedNoteName();
+    if (note) return { app, pid: Number(pid), title: note, url };
+  }
   return { app, pid: Number(pid), title, url };
 }
 

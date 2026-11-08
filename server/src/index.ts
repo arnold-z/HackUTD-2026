@@ -167,6 +167,11 @@ function norm(s: string): string {
   return s.trim().toLowerCase();
 }
 
+// Apps that hold many unrelated documents or chats under one window title: always judged by
+// what's on screen (screenshot), never waved through by an app rule or an earlier verdict.
+const CONTENT_APPS = ['notes', 'pages', 'preview', 'textedit', 'microsoft word', 'obsidian', 'notion', 'bear', 'keynote', 'numbers', 'mail', 'messages', 'slack', 'discord', 'reminders'];
+const isContentApp = (app: string) => CONTENT_APPS.includes(norm(app));
+
 const BROWSERS = ['google chrome', 'safari', 'arc', 'brave browser', 'microsoft edge', 'firefox', 'chromium', 'opera', 'vivaldi', 'zen'];
 
 // Most specific evidence wins: a keyword in the page title ("dijkstra") beats a whole-domain
@@ -184,7 +189,7 @@ function matchRule(ctx: Ctx, sessionId: bigint, ev: { app: string; title: string
     const d = p.replace(/^www\./, '');
     if (r.kind === 'keyword' && p.length >= 3 && text.includes(p)) score = 4;
     else if (r.kind === 'domain' && host && (host === d || host.endsWith('.' + d))) score = 3;
-    else if (r.kind === 'app' && app === p && !isBrowser) score = 1; // app rules never cover a browser
+    else if (r.kind === 'app' && app === p && !isBrowser && !isContentApp(ev.app)) score = 1; // app rules never cover a browser or a content app
     if (score === 0) continue;
     if (r.verdict === 'off_task') score += 0.5;
     if (!best || score > best.score) best = { verdict: r.verdict, pattern: r.pattern, kind: r.kind, score };
@@ -194,6 +199,7 @@ function matchRule(ctx: Ctx, sessionId: bigint, ev: { app: string; title: string
 
 // Reuse an earlier verdict for the exact same window in this session (instant "Back" button).
 function rememberedVerdict(ctx: Ctx, sessionId: bigint, ev: { app: string; title: string; url: string }) {
+  if (isContentApp(ev.app)) return undefined; // same title can hide a different note
   let found: EventRow | undefined;
   for (const e of ctx.db.activityEvent.sessionId.filter(sessionId)) {
     if (e.verdict !== 'pending' && e.source === 'judge' && e.app === ev.app && e.title === ev.title && e.url === ev.url) {
@@ -216,6 +222,15 @@ function applyVerdict(ctx: Ctx, s: SessionRow, ev: EventRow) {
   const open = openIntervention(ctx, s.id);
   if (ev.verdict === 'on_task' && open) {
     ctx.db.intervention.id.update({ ...open, resolvedAt: ctx.timestamp });
+  } else if (ev.verdict === 'off_task' && open && open.eventId !== ev.id) {
+    // Hopped from one distraction to another: the block now describes the current one.
+    // shownAt and alerted stay, so the 10-second text timer keeps running.
+    ctx.db.intervention.id.update({
+      ...open,
+      eventId: ev.id,
+      distraction: ev.url ? `${hostOf(ev.url)} — ${ev.title}` : `${ev.app} — ${ev.title}`,
+      reason: ev.reason,
+    });
   } else if (ev.verdict === 'off_task' && !open) {
     const iv = ctx.db.intervention.insert({
       id: 0n,

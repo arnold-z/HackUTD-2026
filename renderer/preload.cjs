@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('fg', {
   endSession: (phrase) => ipcRenderer.invoke('end-session', { phrase }),
   goBack: () => ipcRenderer.invoke('go-back'),
   getState: () => ipcRenderer.invoke('get-state'),
+  openPermission: (kind) => ipcRenderer.invoke('open-permission', kind),
+  restartApp: () => ipcRenderer.invoke('restart-app'),
   onState: (cb) => {
     const handler = (_e, state) => cb(state);
     ipcRenderer.on('state', handler);

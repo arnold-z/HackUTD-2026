@@ -31,8 +31,8 @@ export const config = {
   spectrumProjectSecret: env('SPECTRUM_PROJECT_SECRET'),
   userPhone: env('USER_PHONE'),
   stdbUri: env('STDB_URI', 'ws://127.0.0.1:3000'),
-  stdbDatabase: env('STDB_DATABASE', 'focusguard'),
+  stdbDatabase: env('STDB_DATABASE', 'anchor'),
   pollMs: Number(env('POLL_MS', '1000')),
-  // Set FOCUSGUARD_DRY_RUN_SMS=1 to log alerts instead of texting (useful while testing).
-  dryRunSms: env('FOCUSGUARD_DRY_RUN_SMS') === '1',
+  // Set ANCHOR_DRY_RUN_SMS=1 to log alerts instead of texting (useful while testing).
+  dryRunSms: env('ANCHOR_DRY_RUN_SMS') === '1',
 };

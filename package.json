@@ -1,20 +1,20 @@
 {
-  "name": "focusguard",
+  "name": "anchor",
   "version": "1.0.0",
   "private": true,
-  "description": "Desktop focus guard: a Nemotron agent judges every window you switch to and pulls you back when you drift.",
+  "description": "Desktop focus anchor: a Nemotron agent judges every window you switch to and pulls you back when you drift.",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "db:start": "spacetime start",
-    "db:publish": "spacetime publish focusguard --server local --module-path ./server --delete-data=always --yes",
+    "db:publish": "spacetime publish anchor --server local --module-path ./server --delete-data=always --yes",
     "db:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --module-path ./server --yes",
     "build": "node scripts/build.mjs",
     "start": "npm run build && electron .",
     "smoke": "npm run build && node dist/smoke.js",
     "typecheck": "tsc --noEmit -p .",
-    "package:mac": "npm run build && electron-packager . FocusGuard --out=release --overwrite --icon=build/icon.icns --app-bundle-id=com.focusguard.app --extend-info=build/Info.extend.plist --ignore=^/server --ignore=^/src --ignore=^/scripts --ignore=^/release --no-asar && sh scripts/sign-mac.sh && echo '\\nBuilt: '$(ls -d release/FocusGuard-darwin-*/FocusGuard.app)",
-    "app": "open release/FocusGuard-darwin-*/FocusGuard.app"
+    "package:mac": "npm run build && electron-packager . Anchor --out=release --overwrite --icon=build/icon.icns --app-bundle-id=com.anchor.app --extend-info=build/Info.extend.plist --ignore=^/server --ignore=^/src --ignore=^/scripts --ignore=^/release --no-asar && sh scripts/sign-mac.sh && echo '\\nBuilt: '$(ls -d release/Anchor-darwin-*/Anchor.app)",
+    "app": "open release/Anchor-darwin-*/Anchor.app"
   },
   "dependencies": {
     "spacetimedb": "2.14.1",
@@ -27,5 +27,5 @@
     "typescript": "~5.6.2",
     "@electron/packager": "^20.3.0"
   },
-  "productName": "FocusGuard"
+  "productName": "Anchor"
 }

@@ -1,6 +1,6 @@
 // macOS window access through AppleScript (osascript): no native modules needed.
 // Needs: Accessibility (window titles + refocus) and Automation (browser URLs) permissions
-// for the app running FocusGuard (Terminal/iTerm/VS Code in dev, or FocusGuard itself).
+// for the app running Anchor (Terminal/iTerm/VS Code in dev, or Anchor itself).
 import { execFile } from 'node:child_process';
 
 export type FrontWindow = { app: string; pid: number; title: string; url: string; noteId?: string };

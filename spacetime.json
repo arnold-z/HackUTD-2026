@@ -1,5 +1,5 @@
 {
   "module-path": "./server",
   "server": "local",
-  "database": "focusguard"
+  "database": "anchor"
 }

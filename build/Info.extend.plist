@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSAppleEventsUsageDescription</key>
-  <string>FocusGuard reads the frontmost window and browser tab, and switches you back to your work.</string>
+  <string>Anchor reads the frontmost window and browser tab, and switches you back to your work.</string>
 </dict>
 </plist>

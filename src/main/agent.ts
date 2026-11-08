@@ -258,7 +258,7 @@ Rules:
       }
     }
 
-    const system = `You are FocusGuard's Judge, an autonomous agent on the user's Mac. The user committed to a goal. They just switched to a window. Decide if this window helps that goal.
+    const system = `You are Anchor's Judge, an autonomous agent on the user's Mac. The user committed to a goal. They just switched to a window. Decide if this window helps that goal.
 Work in steps: call tools when the title is ambiguous (fetch the page, check context or rules), optionally save_rule when the decision generalizes, then call record_verdict exactly once.
 Guidelines:
 - Tutorials, docs, references, search results, course sites, code, notes, AI assistants, and messages about the goal topic are on_task.
@@ -422,7 +422,7 @@ Guidelines:
     } catch {
       /* template below */
     }
-    if (!text || text.length > 240) text = `FocusGuard: ${secs}s on ${iv.distraction.split(' — ')[0]}. You're ${mins} min into "${s.goal}". Back to it.`;
+    if (!text || text.length > 240) text = `Anchor: ${secs}s on ${iv.distraction.split(' — ')[0]}. You're ${mins} min into "${s.goal}". Back to it.`;
     const res = await sendText(s.phone, text);
     await this.trace(job, null, 'send_imessage', JSON.stringify({ to: s.phone }), `${res.ok ? 'sent' : 'FAILED'}: ${text}${res.ok ? '' : ` (${res.detail})`}`);
   }
@@ -445,7 +445,7 @@ Guidelines:
     const m = this.metricsFor(s.id);
     await this.trace(job, 1, 'get_metrics', '', JSON.stringify(m));
     const facts = JSON.stringify({ goal: s.goal, planned_minutes: s.minutes, ...m });
-    const ask = `Write a session debrief iMessage for a focus app. Under 400 characters, plain text, no markdown, 3-5 short lines. First line: "FocusGuard · <short goal> · <minutes> min". Include focus score, on-task %, drifts and average return time, top distractor if any, and one specific suggestion for next time. Use only these facts: ${facts}`;
+    const ask = `Write a session debrief iMessage for a focus app. Under 400 characters, plain text, no markdown, 3-5 short lines. First line: "Anchor · <short goal> · <minutes> min". Include focus score, on-task %, drifts and average return time, top distractor if any, and one specific suggestion for next time. Use only these facts: ${facts}`;
     let text = '';
     for (const thinking of [true, false]) {
       try {
@@ -459,7 +459,7 @@ Guidelines:
     if (!text) {
       const top = m.topDistractors[0];
       text = [
-        `FocusGuard · ${s.goal.slice(0, 40)} · ${Math.round(m.sessionMinutes)} min`,
+        `Anchor · ${s.goal.slice(0, 40)} · ${Math.round(m.sessionMinutes)} min`,
         `Focus ${m.focusScore}/100 (on-task ${Math.round(m.onTaskRatio * 100)}%)`,
         `${m.drifts} drifts${m.meanReturnSeconds !== null ? `, avg return ${m.meanReturnSeconds}s` : ''}, ${m.alertsSent} alerts`,
         top ? `Top distractor: ${top.name} (${top.minutes} min)` : 'No distractions logged',
@@ -500,7 +500,7 @@ export async function fetchPageSummary(url: string): Promise<string> {
     const r = await fetch(url, {
       signal: ctrl.signal,
       redirect: 'follow',
-      headers: { 'user-agent': 'Mozilla/5.0 (Macintosh) FocusGuard/1.0', accept: 'text/html,*/*' },
+      headers: { 'user-agent': 'Mozilla/5.0 (Macintosh) Anchor/1.0', accept: 'text/html,*/*' },
     });
     const html = (await r.text()).slice(0, 400_000);
     const pick = (re: RegExp) => (re.exec(html)?.[1] ?? '').replace(/\s+/g, ' ').trim();

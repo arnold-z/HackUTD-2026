@@ -1,4 +1,4 @@
-# FocusGuard
+# Anchor
 
 A macOS focus app for the NVIDIA Nemotron track. You set a goal; a Nemotron agent judges every window and browser tab you switch to. Go off-task and a full-screen overlay blocks the screen until you go back. Stay off-task for 10 seconds and the agent texts your phone over iMessage (Photon). At the end you get a debrief text with focus metrics. All state lives in SpacetimeDB.
 
@@ -12,7 +12,7 @@ curl -sSf https://install.spacetimedb.com | sh
 # open a new terminal so `spacetime` is on your PATH
 
 # 2. Dependencies
-cd focusguard
+cd anchor
 npm install
 (cd server && npm install)
 
@@ -29,7 +29,7 @@ npm run smoke              # add `-- --send` to text USER_PHONE a test message
 npm start
 ```
 
-`.env` already holds your keys. Set `FOCUSGUARD_DRY_RUN_SMS=1` there to print texts in the terminal instead of sending them while you test.
+`.env` already holds your keys. Set `ANCHOR_DRY_RUN_SMS=1` there to print texts in the terminal instead of sending them while you test.
 
 ### macOS permissions (do this before demoing)
 
@@ -44,22 +44,22 @@ Restart `npm start` after changing them. Chrome or Safari is needed for exact ta
 
 ## Install as a real Mac app
 
-`npm start` runs FocusGuard inside the generic "Electron" app. To get a proper **FocusGuard.app** with its own name and icon in the Dock, Cmd+Tab and Launchpad:
+`npm start` runs Anchor inside the generic "Electron" app. To get a proper **Anchor.app** with its own name and icon in the Dock, Cmd+Tab and Launchpad:
 
 ```bash
 npm install            # once, picks up the packager
-npm run package:mac    # builds release/FocusGuard-darwin-arm64/FocusGuard.app
-cp -R release/FocusGuard-darwin-*/FocusGuard.app /Applications/
-open /Applications/FocusGuard.app
+npm run package:mac    # builds release/Anchor-darwin-arm64/Anchor.app
+cp -R release/Anchor-darwin-*/Anchor.app /Applications/
+open /Applications/Anchor.app
 ```
 
 **Keep permissions across rebuilds (one-time, 1 minute).** macOS ties permissions to the app's signature. Create a signing certificate once and every build is signed with it:
 
 1. Open **Keychain Access** → menu **Keychain Access → Certificate Assistant → Create a Certificate…**
-2. Name: `FocusGuard Dev`, Identity Type: **Self-Signed Root**, Certificate Type: **Code Signing** → Create.
-3. Run `npm run package:mac`. It prints `Signed with "FocusGuard Dev"`. Reset permissions one last time (`tccutil reset All com.focusguard.app`), grant them, and they now survive rebuilds.
+2. Name: `Anchor Dev`, Identity Type: **Self-Signed Root**, Certificate Type: **Code Signing** → Create.
+3. Run `npm run package:mac`. It prints `Signed with "Anchor Dev"`. Reset permissions one last time (`tccutil reset All com.anchor.app`), grant them, and they now survive rebuilds.
 
-The app reads its settings from the `.env` bundled at build time, so re-run `npm run package:mac` after editing `.env`. Because it's a new app to macOS, grant **FocusGuard** Accessibility and Automation permissions again (System Settings → Privacy & Security). Each rebuild gets a new signature, so you may need to toggle those permissions off and on after rebuilding. Logs: `~/Library/Logs/FocusGuard/main.log`.
+The app reads its settings from the `.env` bundled at build time, so re-run `npm run package:mac` after editing `.env`. Because it's a new app to macOS, grant **Anchor** Accessibility and Automation permissions again (System Settings → Privacy & Security). Each rebuild gets a new signature, so you may need to toggle those permissions off and on after rebuilding. Logs: `~/Library/Logs/Anchor/main.log`.
 
 ## How it works
 
@@ -95,8 +95,8 @@ Ending a session early always works: type `i am done focusing` in the End sessio
 ## Useful commands
 
 ```bash
-spacetime sql focusguard "SELECT * FROM activity_event"   # inspect data
-spacetime logs focusguard -f                                # module logs
+spacetime sql anchor "SELECT * FROM activity_event"   # inspect data
+spacetime logs anchor -f                                # module logs
 npm run db:publish                                          # republish (wipes data)
 npm run db:generate                                         # regenerate bindings after changing server/src/index.ts
 ```

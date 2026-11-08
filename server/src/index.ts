@@ -1,4 +1,4 @@
-// FocusGuard SpacetimeDB module.
+// Anchor SpacetimeDB module.
 // All session state lives here. The desktop app logs window changes; reducers decide
 // instantly from cached rules, queue Nemotron "judge" jobs for unknown windows,
 // raise interventions (the overlay), and schedule the 10-second iMessage alert.

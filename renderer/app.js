@@ -138,7 +138,7 @@ function renderPermissions(p) {
   $('perms').classList.remove('hidden'); // always visible, so access can be verified at a glance
   const key = JSON.stringify(p);
   if (key === lastPermKey) return;
-  $('permTitle').textContent = needs ? 'FocusGuard needs access' : 'Permissions';
+  $('permTitle').textContent = needs ? 'Anchor needs access' : 'Permissions';
   lastPermKey = key;
   const restart = PERMS.some((x) => p[x.key] === 'restart');
   $('permRows').innerHTML = PERMS.map((x) => {
@@ -146,11 +146,11 @@ function renderPermissions(p) {
     const label = s === 'ok' ? 'On' : s === 'restart' ? 'Restart to apply' : 'Off';
     // macOS often reports Screen Recording as off until the app restarts, so offer the restart right away.
     const restartBtn = x.key === 'screen' && s === 'missing' ? '<button class="btn" data-restart>Restart</button>' : '';
-    const btn = s === 'missing' ? `<button class="btn" data-perm="${x.key}">Open settings</button>${restartBtn}` : s === 'restart' ? '<button class="btn primary" data-restart>Restart FocusGuard</button>' : '';
+    const btn = s === 'missing' ? `<button class="btn" data-perm="${x.key}">Open settings</button>${restartBtn}` : s === 'restart' ? '<button class="btn primary" data-restart>Restart Anchor</button>' : '';
     return `<div class="row"><div class="main"><div class="title">${x.name}</div><div class="detail">${x.why}</div></div><span class="perm-state ${s}">${label}</span>${btn}</div>`;
   }).join('');
   $('permNote').textContent = !needs
-    ? 'Everything FocusGuard needs is turned on.'
+    ? 'Everything Anchor needs is turned on.'
     : restart
     ? 'macOS applies Screen Recording only after a restart. Your session continues afterwards.'
     : `In the settings page, turn on ${p.appName}, then click Restart. If it's on but still shows Off after restarting, remove it with − and add it again with +.`;

@@ -48,7 +48,7 @@ export async function sendText(phone: string, text: string): Promise<{ ok: boole
   if (!to) return { ok: false, detail: 'no phone number' };
   if (config.dryRunSms) {
     console.log(`[photon dry-run] to ${to}: ${text}`);
-    return { ok: true, detail: 'dry run (FOCUSGUARD_DRY_RUN_SMS=1)' };
+    return { ok: true, detail: 'dry run (ANCHOR_DRY_RUN_SMS=1)' };
   }
   try {
     const app = await initPhoton();

@@ -1,4 +1,4 @@
-// FocusGuard Electron main process.
+// Anchor Electron main process.
 import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences, shell, desktopCapturer } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,8 +44,8 @@ const noteIdByKey = new Map<string, string>(); // Apple Notes: window key -> not
 const keyOf = (w: { app: string; title: string; url: string }) => `${w.app}\u0001${w.title}\u0001${w.url}`;
 
 // ---------------- Crash guard + log file ----------------
-// Any error is logged to ~/Library/Logs/FocusGuard/main.log and the app keeps running.
-app.setName('FocusGuard');
+// Any error is logged to ~/Library/Logs/Anchor/main.log and the app keeps running.
+app.setName('Anchor');
 let logFile = '';
 function logLine(level: string, args: unknown[]) {
   if (!logFile) return;
@@ -92,7 +92,7 @@ function permissions() {
   const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
   const automationBlocked = /automation|-1743|not authori[sz]ed to send apple events/i.test(watcherError);
   return {
-    appName: app.isPackaged ? 'FocusGuard' : 'Electron (and the Terminal you launched from)',
+    appName: app.isPackaged ? 'Anchor' : 'Electron (and the Terminal you launched from)',
     screen: screenNow === 'granted' ? (screenAtLaunch === 'granted' ? 'ok' : 'restart') : 'missing',
     accessibility: accessibility ? 'ok' : 'missing',
     automation: automationBlocked ? 'missing' : 'ok',
@@ -106,7 +106,7 @@ function createMainWindow() {
     height: 760,
     minWidth: 860,
     minHeight: 600,
-    title: 'FocusGuard',
+    title: 'Anchor',
     // Native macOS look: inset traffic lights, translucent sidebar, follows light/dark mode.
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },
@@ -157,7 +157,7 @@ function trayImage(name: string) {
 
 function createTray() {
   tray = new Tray(trayImage('idleTemplate'));
-  tray.setToolTip('FocusGuard');
+  tray.setToolTip('Anchor');
   tray.on('click', () => showMain());
   updateTray();
 }
@@ -190,7 +190,7 @@ function updateTray() {
   if (!tray || tray.isDestroyed()) return;
   const s = conn ? activeSession(conn) : undefined;
   const latest = s && conn ? conn.db.activityEvent.id.find(s.latestEventId) : undefined;
-  let title = ' FocusGuard';
+  let title = ' Anchor';
   let windowLabel = '';
   if (s) {
     const left = s.minutes * 60000 - (Date.now() - micros(s.startedAt));
@@ -222,8 +222,8 @@ function updateTray() {
       { label: s ? `Focusing on: ${s.goal.slice(0, 40)}` : 'No focus session', enabled: false },
       ...(windowLabel ? [{ label: `Now: ${windowLabel}`, enabled: false }] : []),
       { type: 'separator' as const },
-      { label: 'Open FocusGuard', click: () => showMain() },
-      { label: s ? 'Quit (end the session first)' : 'Quit FocusGuard', enabled: !s, click: () => quitApp() },
+      { label: 'Open Anchor', click: () => showMain() },
+      { label: s ? 'Quit (end the session first)' : 'Quit Anchor', enabled: !s, click: () => quitApp() },
     ])
   );
 }
@@ -329,7 +329,7 @@ async function tick() {
   } catch (err: any) {
     const msg = String(err?.message ?? err);
     watcherError = /not allowed|assistive|1002|-1743|-25211/i.test(msg)
-      ? 'macOS blocked window access. Open System Settings → Privacy & Security → Accessibility (and Automation) and enable the app running FocusGuard (Terminal / VS Code / Electron), then restart it.'
+      ? 'macOS blocked window access. Open System Settings → Privacy & Security → Accessibility (and Automation) and enable the app running Anchor (Terminal / VS Code / Electron), then restart it.'
       : `window watcher: ${msg}`;
     pushState();
     return;
@@ -628,7 +628,7 @@ app.whenReady().then(() => {
   try {
     mkdirSync(app.getPath('logs'), { recursive: true });
     logFile = join(app.getPath('logs'), 'main.log');
-    console.log('[app] FocusGuard started; log file:', logFile);
+    console.log('[app] Anchor started; log file:', logFile);
   } catch {
     /* logging stays console-only */
   }
@@ -674,7 +674,7 @@ app.on('before-quit', (e) => {
     dialog.showMessageBox(mainWin!, {
       type: 'info',
       message: 'A focus session is running.',
-      detail: `End it first: type "${END_PHRASE}" in FocusGuard's End session box.`,
+      detail: `End it first: type "${END_PHRASE}" in Anchor's End session box.`,
     });
     return;
   }

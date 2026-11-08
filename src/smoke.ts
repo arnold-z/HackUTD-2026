@@ -82,7 +82,7 @@ async function checkPhoton() {
   if (!config.spectrumProjectId || !config.spectrumProjectSecret) return bad('SPECTRUM_PROJECT_ID / SECRET missing');
   if (!send) return ok('credentials present (run with -- --send to text USER_PHONE a test message)');
   const { sendText, stopPhoton } = await import('./main/photon.js');
-  const r = await sendText(config.userPhone, 'FocusGuard test: Photon is connected.');
+  const r = await sendText(config.userPhone, 'Anchor test: Photon is connected.');
   r.ok ? ok(r.detail) : bad(r.detail);
   await stopPhoton();
 }

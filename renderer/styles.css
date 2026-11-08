@@ -1,4 +1,4 @@
-/* FocusGuard — macOS system-themed UI. Colors follow light/dark mode and the user's accent color. */
+/* Anchor — macOS system-themed UI. Colors follow light/dark mode and the user's accent color. */
 :root {
   color-scheme: light dark;
   --accent: #007aff; /* replaced at runtime with the macOS accent color */

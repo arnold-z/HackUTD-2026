@@ -8,18 +8,25 @@
 </head>
 <body class="overlay">
   <main class="ov">
-    <div class="eyebrow">Off task</div>
-    <h1>This isn't what you came here to do.</h1>
-    <p class="goalline">You're working on <span id="goal"></span></p>
-    <div class="what" id="what"></div>
-    <div class="why" id="why"></div>
-    <button id="back" class="btn primary back">Back to work</button>
-    <div class="alert" id="alert"></div>
+    <div class="dial off" id="dial">
+      <svg viewBox="0 0 236 236" aria-hidden="true">
+        <circle class="track" cx="118" cy="118" r="104" />
+        <circle class="arc" id="dialArc" cx="118" cy="118" r="104" />
+      </svg>
+      <div class="center">
+        <div class="time" id="count">10</div>
+        <div class="sub" id="countSub">until we text you</div>
+      </div>
+    </div>
+    <h1>This isn't part of your goal</h1>
+    <p class="goal">You're working on <b id="goal"></b></p>
+    <p class="why" id="why"></p>
+    <button id="back" class="btn primary large">Back to work</button>
   </main>
   <div class="escape">
-    <a id="showEnd">End session</a>
-    <div class="endbox hidden" id="endBox">
-      <input id="endPhrase" type="text" placeholder="Type: i am done focusing" />
+    <button class="link" id="showEnd">End session</button>
+    <div class="end hidden" id="endBox">
+      <input id="endPhrase" type="text" placeholder="Type: i am done focusing" autocomplete="off" />
       <button id="endBtn" class="btn">End</button>
     </div>
   </div>

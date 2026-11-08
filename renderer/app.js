@@ -1,37 +1,51 @@
 // Main window UI. State is pushed from the main process (SpacetimeDB cache + agent status).
 const $ = (id) => document.getElementById(id);
-let state = null;
 let phoneTouched = false;
+const RING = 2 * Math.PI * 104;
 
-const fmtClock = (ms) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+const clock = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
 };
-const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const timeOf = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const host = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const label = (v) => ({ on_task: 'on task', off_task: 'off task', pending: 'judging…' }[v] || v);
+const VERDICT = { on_task: 'On task', off_task: 'Off task', pending: 'Checking…' };
+const WHO = { judge: 'Judge', profile: 'Setup', alert: 'Alert', debrief: 'Summary' };
 
-function setPill(id, cls, text) {
+function status(id, cls, text) {
   const el = $(id);
-  el.className = `pill ${cls}`;
+  el.className = `status ${cls}`;
   el.innerHTML = `<i></i>${esc(text)}`;
 }
 
+function setDial(fraction, time, sub, mode) {
+  const dial = $('dial');
+  dial.className = `dial ${mode}`;
+  const arc = $('dialArc');
+  arc.style.strokeDasharray = `${RING}`;
+  arc.style.strokeDashoffset = `${RING * (1 - Math.max(0, Math.min(1, fraction)))}`;
+  $('dialTime').textContent = time;
+  $('dialSub').textContent = sub;
+}
+
 function render(st) {
-  state = st;
-  // Status pills
+  if (st.accent) document.documentElement.style.setProperty('--accent', st.accent);
+
   const db = st.dbStatus === 'connected';
-  setPill('pill-db', db ? 'ok' : 'err', db ? 'SpacetimeDB' : 'SpacetimeDB offline');
-  setPill('pill-llm', st.llm.llm === 'ok' ? 'ok' : st.llm.llm === 'error' ? 'err' : '', st.llm.llm === 'ok' ? `Nemotron ${st.llm.lastLatencyMs} ms` : st.llm.llm === 'error' ? 'Nemotron error' : 'Nemotron');
-  setPill('pill-photon', st.photon.status === 'ready' ? 'ok' : st.photon.status === 'error' ? 'err' : st.photon.status === 'dry-run' ? 'warn' : '', st.photon.status === 'dry-run' ? 'iMessage (dry run)' : 'iMessage');
+  status('pill-db', db ? 'ok' : 'err', 'Database');
+  status('pill-llm', st.llm.llm === 'ok' ? 'ok' : st.llm.llm === 'error' ? 'err' : '', st.llm.llm === 'ok' ? `Nemotron ${(st.llm.lastLatencyMs / 1000).toFixed(1)}s` : 'Nemotron');
+  status('pill-photon', st.photon.status === 'ready' ? 'ok' : st.photon.status === 'error' ? 'err' : st.photon.status === 'dry-run' ? 'warn' : '', st.photon.status === 'dry-run' ? 'iMessage (test mode)' : 'iMessage');
 
   const problems = [];
   if (!db) problems.push(st.dbStatus);
   if (st.watcherError) problems.push(st.watcherError);
-  if (st.llm.llm === 'error') problems.push(`Nemotron: ${st.llm.llmError}`);
-  if (st.photon.status === 'error' && st.photon.error) problems.push(`Photon: ${st.photon.error}`);
-  $('banner').textContent = problems.join('  ·  ');
+  if (st.llm.llm === 'error') problems.push(`Nemotron didn't respond: ${st.llm.llmError}`);
+  if (st.photon.status === 'error' && st.photon.error) problems.push(`iMessage isn't sending: ${st.photon.error}`);
+  $('bannerText').textContent = problems.join(' ');
   $('banner').classList.toggle('hidden', problems.length === 0);
 
   if (!phoneTouched && !$('phone').value) $('phone').value = st.defaultPhone || '';
@@ -40,90 +54,113 @@ function render(st) {
   const active = s && s.status === 'active';
   $('start').classList.toggle('hidden', !!active);
   $('session').classList.toggle('hidden', !active);
+  $('endWrap').classList.toggle('hidden', !active);
+  $('about').classList.toggle('hidden', !!active);
   $('startBtn').disabled = !db;
 
   if (!active) {
-    const show = s && st.summary && st.summary.text;
+    setDial(0, clock((Number($('minutes').value) || 25) * 60000), 'Ready', 'idle');
+    $('sGoal').textContent = 'Pick a goal to start';
+    $('sMeta').textContent = '';
+    const text = st.summary && st.summary.text;
+    const show = s && (text || s.status === 'ended');
     $('lastDebrief').classList.toggle('hidden', !show);
-    if (show) $('lastDebriefText').textContent = st.summary.text + (st.summary.sent ? '\n\n✓ sent to your iMessage' : '\n\n(not delivered by iMessage)');
-    else if (s && s.status === 'ended') {
-      $('lastDebrief').classList.remove('hidden');
-      $('lastDebriefText').textContent = 'Writing your debrief…';
-    }
+    if (show) $('lastDebriefText').textContent = text ? text + (st.summary.sent ? '\n\nSent to your phone.' : "\n\nCouldn't send this to your phone.") : 'Writing your summary…';
     return;
   }
 
-  // Goal + clock
-  const now = Date.now();
+  // Dial: time left, red while an intervention is open
   const total = s.minutes * 60000;
-  const elapsed = now - s.startedMs;
+  const left = total - (Date.now() - s.startedMs);
+  const off = !!st.intervention;
+  setDial(left / total, clock(left), off ? 'Off task' : 'left', off ? 'off' : '');
   $('sGoal').textContent = s.goal;
-  $('sProgress').style.width = `${Math.min(100, (elapsed / total) * 100)}%`;
-  $('sElapsed').textContent = `${fmtClock(elapsed)} elapsed`;
-  $('sLeft').textContent = `${fmtClock(total - elapsed)} left`;
+  $('sMeta').textContent = `${s.minutes}-minute session, started ${timeOf(s.startedMs)}`;
 
-  // Current window
+  // Right now
   const c = st.current;
   if (c) {
-    $('cVerdict').className = `verdict ${c.verdict}`;
-    $('cVerdict').textContent = label(c.verdict);
+    $('cVerdict').className = `badge ${c.verdict}`;
+    $('cVerdict').textContent = VERDICT[c.verdict] || c.verdict;
     $('cTitle').textContent = c.title || c.app;
-    $('cSub').textContent = c.url ? `${c.app} · ${c.url}` : c.app;
-    const src = c.source === 'rule' ? 'rule' : c.source === 'memory' ? 'remembered' : c.source === 'judge' ? `Nemotron, ${Math.round(c.confidence * 100)}%` : '';
-    $('cReason').textContent = c.reason ? `${c.reason}${src ? `  (${src})` : ''}` : c.verdict === 'pending' ? 'The agent is investigating this window…' : '';
+    $('cSub').textContent = c.url ? `${c.app}, ${host(c.url)}` : c.app;
+    const how = c.source === 'rule' ? 'Decided by a learned rule.' : c.source === 'memory' ? 'Seen earlier this session.' : c.source === 'judge' ? `Nemotron, ${Math.round(c.confidence * 100)}% sure.` : '';
+    $('cReason').textContent = c.verdict === 'pending' ? 'The agent is looking into this window.' : [c.reason, how].filter(Boolean).join(' ');
   } else {
-    $('cTitle').textContent = 'Switch to the window you want to work in.';
+    $('cVerdict').className = 'badge pending';
+    $('cVerdict').textContent = 'Waiting';
+    $('cTitle').textContent = 'Switch to the window you want to work in';
     $('cSub').textContent = '';
     $('cReason').textContent = '';
   }
 
-  // Metrics
   const m = st.metrics;
   if (m) {
     $('mScore').textContent = m.focusScore;
     $('mOn').textContent = `${Math.round(m.onTaskRatio * 100)}%`;
     $('mDrifts').textContent = m.drifts;
-    $('mReturn').textContent = m.meanReturnSeconds === null ? '—' : `${m.meanReturnSeconds}s`;
+    $('mReturn').textContent = m.meanReturnSeconds === null ? '–' : `${m.meanReturnSeconds}s`;
   }
 
-  // Event list
-  $('events').innerHTML = st.events.length
-    ? st.events.map((e) => `<div class="list-item"><span class="t">${fmtTime(e.tsMs)}</span><span class="w" title="${esc(e.title)}">${esc(e.title || e.app)} <span style="color:var(--faint)">${esc(host(e.url) || e.app)}</span></span><span class="dot ${e.verdict}"></span></div>`).join('')
-    : '<div class="empty">No windows yet.</div>';
-
-  // Agent trace
   $('latency').textContent = st.model.split('/').pop();
   $('trace').innerHTML = st.trace.length
-    ? st.trace.map((t) => `<div class="step"><div class="head"><span class="kind ${esc(t.kind)}">${esc(t.kind)}</span><span class="tool">${esc(t.tool)}</span><span class="ts">${fmtTime(t.tsMs)}</span></div>${t.args && t.args !== '{}' ? `<div class="args">${esc(t.args.slice(0, 300))}</div>` : ''}${t.result ? `<div class="res">→ ${esc(t.result.slice(0, 500))}</div>` : ''}</div>`).join('')
-    : '<div class="empty">The agent’s tool calls will appear here.</div>';
+    ? st.trace
+        .map(
+          (t) => `<div class="row"><span class="who ${esc(t.kind)}">${esc(WHO[t.kind] || t.kind)}</span><div class="main"><div class="tool">${esc(t.tool)}</div>${t.args && t.args !== '{}' ? `<div class="args">${esc(t.args.slice(0, 300))}</div>` : ''}${t.result ? `<div class="res">${esc(t.result.slice(0, 500))}</div>` : ''}</div><span class="time">${timeOf(t.tsMs)}</span></div>`
+        )
+        .join('')
+    : '<div class="empty">Each step the agent takes shows up here.</div>';
 
-  // Rules
+  $('events').innerHTML = st.events.length
+    ? st.events
+        .slice(0, 12)
+        .map((e) => `<div class="row"><span class="dot ${e.verdict}"></span><div class="main"><div class="title">${esc(e.title || e.app)}</div><div class="detail">${esc(host(e.url) || e.app)}</div></div><span class="time">${timeOf(e.tsMs)}</span></div>`)
+        .join('')
+    : '<div class="empty">Windows you switch to will be listed here.</div>';
+
   $('rules').innerHTML = s.rules.length
-    ? s.rules.map((r) => `<span class="chip ${r.verdict}" title="${esc(r.source)}">${r.verdict === 'on_task' ? '+' : '−'} ${esc(r.kind)}:${esc(r.pattern)}</span>`).join('')
-    : '<span class="empty">Building your context profile…</span>';
+    ? s.rules.map((r) => `<span class="chip ${r.verdict}" title="${r.verdict === 'on_task' ? 'Counts as on task' : 'Counts as off task'}">${esc(r.pattern)}</span>`).join('')
+    : '<span class="empty" style="padding:0">Setting up rules from your goal…</span>';
 }
 
+// Length presets
+for (const b of $('lengths').querySelectorAll('button')) {
+  b.addEventListener('click', () => {
+    $('minutes').value = b.dataset.min;
+    for (const o of $('lengths').querySelectorAll('button')) o.classList.toggle('on', o === b);
+    window.fg.getState().then(render);
+  });
+}
+$('minutes').addEventListener('input', () => {
+  for (const o of $('lengths').querySelectorAll('button')) o.classList.toggle('on', o.dataset.min === $('minutes').value);
+  window.fg.getState().then(render);
+});
 $('phone').addEventListener('input', () => (phoneTouched = true));
+
 $('startBtn').addEventListener('click', async () => {
   const goal = $('goal').value.trim();
   if (!goal) return $('goal').focus();
   $('startBtn').disabled = true;
   try {
-    await window.fg.startSession(goal, Number($('minutes').value) || 30, $('phone').value.trim());
+    await window.fg.startSession(goal, Number($('minutes').value) || 25, $('phone').value.trim());
+    $('goal').value = '';
   } catch (e) {
     alert(e.message || e);
   } finally {
     $('startBtn').disabled = false;
   }
 });
-$('endBtn').addEventListener('click', async () => {
+
+async function endSession() {
   const ok = await window.fg.endSession($('endPhrase').value);
+  $('endPhrase').value = '';
   if (!ok) {
-    $('endPhrase').value = '';
-    $('endPhrase').placeholder = 'Type exactly: i am done focusing';
+    $('endPhrase').placeholder = 'Type it exactly';
     $('endPhrase').focus();
-  } else $('endPhrase').value = '';
-});
+  }
+}
+$('endBtn').addEventListener('click', endSession);
+$('endPhrase').addEventListener('keydown', (e) => e.key === 'Enter' && endSession());
 
 window.fg.onState(render);
 window.fg.getState().then(render);

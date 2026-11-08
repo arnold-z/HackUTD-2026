@@ -7,76 +7,115 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">Focus<b>Guard</b></div>
-    <div class="pills">
-      <span class="pill" id="pill-db"><i></i>SpacetimeDB</span>
-      <span class="pill" id="pill-llm"><i></i>Nemotron</span>
-      <span class="pill" id="pill-photon"><i></i>iMessage</span>
-    </div>
-  </header>
-  <div id="banner" class="banner hidden"></div>
-
-  <!-- Start screen -->
-  <section id="start" class="start">
-    <div class="eyebrow">New focus session</div>
-    <h1>What are you finishing?</h1>
-    <p class="lead">A Nemotron agent judges every window you switch to. Drift off-task and the screen locks until you go back. Stay off for 10 seconds and it texts you.</p>
-    <label for="goal">End goal</label>
-    <textarea id="goal" placeholder="Finish CS 3345 Assignment 4: implement Dijkstra in Python"></textarea>
-    <div class="row">
-      <div><label for="minutes">Minutes</label><input id="minutes" type="number" min="1" max="600" value="30" /></div>
-      <div><label for="phone">iMessage alerts to</label><input id="phone" type="tel" /></div>
-    </div>
-    <button id="startBtn" class="btn primary">Start focus session</button>
-    <div class="hint">Ending early requires typing the phrase “i am done focusing”.</div>
-    <div id="lastDebrief" class="debrief hidden"><h3>Last session debrief</h3><div id="lastDebriefText"></div></div>
-  </section>
-
-  <!-- Active session -->
-  <section id="session" class="session hidden">
-    <div class="col">
-      <div class="card">
-        <h2>Goal</h2>
-        <div class="goal" id="sGoal"></div>
-        <div class="progress"><div id="sProgress"></div></div>
-        <div class="clock"><span id="sElapsed"></span><span id="sLeft"></span></div>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="dial idle" id="dial">
+        <svg viewBox="0 0 236 236" aria-hidden="true">
+          <circle class="track" cx="118" cy="118" r="104" />
+          <circle class="arc" id="dialArc" cx="118" cy="118" r="104" />
+        </svg>
+        <div class="center">
+          <div class="time" id="dialTime">25:00</div>
+          <div class="sub" id="dialSub">Ready</div>
+        </div>
       </div>
-      <div class="card" id="currentCard">
-        <h2>Current window <span id="cVerdict" class="verdict pending">waiting</span></h2>
-        <div class="window-title" id="cTitle">—</div>
-        <div class="window-sub" id="cSub"></div>
-        <div class="reason" id="cReason"></div>
+      <div class="goal-block">
+        <div class="goal" id="sGoal">Pick a goal to start</div>
+        <div class="meta" id="sMeta"></div>
       </div>
-      <div class="metrics">
-        <div class="metric"><div class="v" id="mScore">—</div><div class="k">Focus score</div></div>
-        <div class="metric"><div class="v" id="mOn">—</div><div class="k">On-task</div></div>
-        <div class="metric"><div class="v" id="mDrifts">—</div><div class="k">Drifts</div></div>
-        <div class="metric"><div class="v" id="mReturn">—</div><div class="k">Avg return</div></div>
-      </div>
-      <div class="card grow">
-        <h2>Windows this session</h2>
-        <div class="list" id="events"></div>
-      </div>
-      <div class="card">
-        <h2>End session</h2>
-        <div class="endbox">
-          <input id="endPhrase" type="text" placeholder="Type: i am done focusing" />
+      <div class="spacer"></div>
+      <div id="endWrap" class="hidden">
+        <label class="field" for="endPhrase">To end early, type “i am done focusing”</label>
+        <div class="end">
+          <input id="endPhrase" type="text" autocomplete="off" />
           <button id="endBtn" class="btn">End</button>
         </div>
       </div>
-    </div>
-    <div class="col">
-      <div class="card grow">
-        <h2>Agent trace <span class="model" id="latency"></span></h2>
-        <div class="list trace" id="trace"></div>
+      <p class="about" id="about">A Nemotron agent checks every window you switch to and pulls you back when you drift.</p>
+      <div class="brand">FocusGuard</div>
+    </aside>
+
+    <main class="content">
+      <div class="toolbar">
+        <span class="status" id="pill-db"><i></i>Database</span>
+        <span class="status" id="pill-llm"><i></i>Nemotron</span>
+        <span class="status" id="pill-photon"><i></i>iMessage</span>
       </div>
-      <div class="card">
-        <h2>Learned rules</h2>
-        <div class="chips" id="rules"></div>
+      <div class="pane">
+        <div id="banner" class="banner hidden"><span id="bannerText"></span></div>
+
+        <!-- Start a session -->
+        <section id="start" class="start">
+          <h1>What are you finishing?</h1>
+          <p class="lead">Name the goal. If you switch to something unrelated, the screen locks until you go back, and after 10 seconds your phone gets a text.</p>
+          <label class="field" for="goal">Goal</label>
+          <textarea id="goal" placeholder="Finish CS 3345 Assignment 4: implement Dijkstra in Python"></textarea>
+          <label class="field">Length</label>
+          <div class="inline">
+            <div class="segmented" id="lengths">
+              <button data-min="15">15 min</button>
+              <button data-min="25" class="on">25 min</button>
+              <button data-min="45">45 min</button>
+              <button data-min="60">1 hour</button>
+            </div>
+            <input id="minutes" type="number" min="1" max="600" value="25" aria-label="Minutes" />
+          </div>
+          <label class="field" for="phone">Text alerts to</label>
+          <input id="phone" type="tel" style="max-width: 240px" />
+          <div class="actions">
+            <button id="startBtn" class="btn primary large">Start focusing</button>
+            <span class="note">Ending early takes a typed phrase.</span>
+          </div>
+          <div class="section hidden" id="lastDebrief">
+            <h2>Last session</h2>
+            <div class="group"><div class="debrief" id="lastDebriefText"></div></div>
+          </div>
+        </section>
+
+        <!-- Active session -->
+        <section id="session" class="hidden">
+          <div class="section">
+            <h2>Right now</h2>
+            <div class="group">
+              <div class="now">
+                <div>
+                  <div class="title" id="cTitle">Switch to the window you want to work in</div>
+                  <div class="detail" id="cSub"></div>
+                </div>
+                <span class="badge pending" id="cVerdict">Waiting</span>
+                <div class="why" id="cReason"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2>This session</h2>
+            <div class="group stats">
+              <div class="stat"><div class="v" id="mScore">–</div><div class="k">Focus score</div></div>
+              <div class="stat"><div class="v" id="mOn">–</div><div class="k">On task</div></div>
+              <div class="stat"><div class="v" id="mDrifts">–</div><div class="k">Drifts</div></div>
+              <div class="stat"><div class="v" id="mReturn">–</div><div class="k">Average return</div></div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2>Agent activity <small id="latency"></small></h2>
+            <div class="group trace trace-list" id="trace"></div>
+          </div>
+
+          <div class="section">
+            <h2>Windows</h2>
+            <div class="group" id="events"></div>
+          </div>
+
+          <div class="section">
+            <h2>What the agent has learned</h2>
+            <div class="group"><div class="chips" id="rules"></div></div>
+          </div>
+        </section>
       </div>
-    </div>
-  </section>
+    </main>
+  </div>
   <script src="app.js"></script>
 </body>
 </html>

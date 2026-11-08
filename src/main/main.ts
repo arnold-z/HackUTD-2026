@@ -1,5 +1,5 @@
 // FocusGuard Electron main process.
-import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, config } from './config.js';
@@ -53,6 +53,17 @@ for (const level of ['log', 'warn', 'error'] as const) {
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason as any));
 
+// ---------------- Theme ----------------
+nativeTheme.themeSource = 'system';
+function accentColor(): string {
+  try {
+    const c = systemPreferences.getAccentColor?.(); // 'RRGGBBAA'
+    return c ? `#${c.slice(0, 6)}` : '#007aff';
+  } catch {
+    return '#007aff';
+  }
+}
+
 // ---------------- Windows ----------------
 function createMainWindow() {
   mainWin = new BrowserWindow({
@@ -61,7 +72,12 @@ function createMainWindow() {
     minWidth: 860,
     minHeight: 600,
     title: 'FocusGuard',
-    backgroundColor: '#0d1110',
+    // Native macOS look: inset traffic lights, translucent sidebar, follows light/dark mode.
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 18, y: 18 },
+    vibrancy: 'sidebar',
+    visualEffectState: 'followWindow',
+    backgroundColor: '#00000000',
     webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false },
   });
   mainWin.loadFile(join(RENDERER, 'index.html'));
@@ -142,7 +158,10 @@ function createOverlays() {
       skipTaskbar: true,
       hasShadow: false,
       alwaysOnTop: true,
-      backgroundColor: '#0b0e0c',
+      transparent: true,
+      vibrancy: 'fullscreen-ui',
+      visualEffectState: 'active',
+      backgroundColor: '#00000000',
       webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false },
     });
     w.setAlwaysOnTop(true, 'screen-saver');
@@ -292,6 +311,7 @@ function snapshot() {
     llm: agent?.status ?? { llm: 'unknown', llmError: '', lastLatencyMs: 0 },
     photon: { status: photonStatus, error: photonError },
     model: config.llmModel,
+    accent: accentColor(),
     defaultPhone: config.userPhone,
     endPhrase: END_PHRASE,
   };
@@ -422,6 +442,8 @@ app.whenReady().then(() => {
     /* logging stays console-only */
   }
   createTray();
+  nativeTheme.on('updated', () => pushState());
+  systemPreferences.on?.('accent-color-changed' as any, () => pushState());
   createMainWindow();
   createOverlays();
   initPhoton()?.catch(() => pushState());

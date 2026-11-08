@@ -38,8 +38,11 @@ import AppendTraceReducer from "./append_trace_reducer";
 import EndSessionReducer from "./end_session_reducer";
 import LogActivityReducer from "./log_activity_reducer";
 import RecordVerdictReducer from "./record_verdict_reducer";
+import RequestSuggestionsReducer from "./request_suggestions_reducer";
 import SaveProfileReducer from "./save_profile_reducer";
+import SaveResourceDocsReducer from "./save_resource_docs_reducer";
 import SaveRuleReducer from "./save_rule_reducer";
+import SaveSuggestionsReducer from "./save_suggestions_reducer";
 import SaveSummaryReducer from "./save_summary_reducer";
 import StartSessionReducer from "./start_session_reducer";
 import UpdateJobReducer from "./update_job_reducer";
@@ -52,8 +55,10 @@ import AgentJobRow from "./agent_job_table";
 import AgentTraceRow from "./agent_trace_table";
 import InterventionRow from "./intervention_table";
 import RelevanceRuleRow from "./relevance_rule_table";
+import ResourceDocRow from "./resource_doc_table";
 import SessionRow from "./session_table";
 import SessionSummaryRow from "./session_summary_table";
+import SuggestionRow from "./suggestion_table";
 
 /** Type-only namespace exports for generated type groups. */
 
@@ -129,6 +134,20 @@ const tablesSchema = __schema({
       { name: 'relevance_rule_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, RelevanceRuleRow),
+  resourceDoc: __table({
+    name: 'resource_doc',
+    indexes: [
+      { accessor: 'id', name: 'resource_doc_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+      { accessor: 'sessionId', name: 'resource_doc_session_id_idx_btree', algorithm: 'btree', columns: [
+        'sessionId',
+      ] },
+    ],
+    constraints: [
+      { name: 'resource_doc_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, ResourceDocRow),
   session: __table({
     name: 'session',
     indexes: [
@@ -154,6 +173,20 @@ const tablesSchema = __schema({
       { name: 'session_summary_session_id_key', constraint: 'unique', columns: ['sessionId'] },
     ],
   }, SessionSummaryRow),
+  suggestion: __table({
+    name: 'suggestion',
+    indexes: [
+      { accessor: 'id', name: 'suggestion_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+      { accessor: 'sessionId', name: 'suggestion_session_id_idx_btree', algorithm: 'btree', columns: [
+        'sessionId',
+      ] },
+    ],
+    constraints: [
+      { name: 'suggestion_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, SuggestionRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
@@ -162,8 +195,11 @@ const reducersSchema = __reducers(
   __reducerSchema("end_session", EndSessionReducer),
   __reducerSchema("log_activity", LogActivityReducer),
   __reducerSchema("record_verdict", RecordVerdictReducer),
+  __reducerSchema("request_suggestions", RequestSuggestionsReducer),
   __reducerSchema("save_profile", SaveProfileReducer),
+  __reducerSchema("save_resource_docs", SaveResourceDocsReducer),
   __reducerSchema("save_rule", SaveRuleReducer),
+  __reducerSchema("save_suggestions", SaveSuggestionsReducer),
   __reducerSchema("save_summary", SaveSummaryReducer),
   __reducerSchema("start_session", StartSessionReducer),
   __reducerSchema("update_job", UpdateJobReducer),

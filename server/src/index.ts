@@ -106,6 +106,35 @@ const sessionSummary = table(
   }
 );
 
+// Files from the session's resource folder that were indexed for retrieval (vectors stay local).
+const resourceDoc = table(
+  { name: 'resource_doc', public: true },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    sessionId: t.u64().index('btree'),
+    path: t.string(),
+    name: t.string(),
+    chunks: t.u32(),
+    status: t.string(), // 'indexed' | 'skipped' | 'error'
+    detail: t.string(),
+  }
+);
+
+// Files the agent suggested while the user stayed on a window.
+const suggestion = table(
+  { name: 'suggestion', public: true },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    sessionId: t.u64().index('btree'),
+    eventId: t.u64(),
+    path: t.string(),
+    name: t.string(),
+    why: t.string(),
+    score: t.f32(),
+    ts: t.timestamp(),
+  }
+);
+
 // Fires 10 s after an intervention is shown.
 const alertCheck = table(
   { name: 'alert_check' },
@@ -136,6 +165,8 @@ const spacetimedb = schema({
   sessionSummary,
   alertCheck,
   sessionTimer,
+  resourceDoc,
+  suggestion,
 });
 export default spacetimedb;
 
@@ -392,6 +423,29 @@ export const appendTrace = spacetimedb.reducer(
       result: result.slice(0, 2000),
       ts: ctx.timestamp,
     });
+  }
+);
+
+const DocInput = t.object('DocInput', { path: t.string(), name: t.string(), chunks: t.u32(), status: t.string(), detail: t.string() });
+const SuggestionInput = t.object('SuggestionInput', { path: t.string(), name: t.string(), why: t.string(), score: t.f32() });
+
+// The app calls this after the user has stayed on an on-task window for a few seconds.
+export const requestSuggestions = spacetimedb.reducer({ sessionId: t.u64(), eventId: t.u64() }, (ctx, { sessionId, eventId }) => {
+  const s = ownedSession(ctx, sessionId);
+  if (s.status !== 'active') return;
+  queueJob(ctx, sessionId, 'suggest', eventId);
+});
+
+export const saveResourceDocs = spacetimedb.reducer({ sessionId: t.u64(), docs: t.array(DocInput) }, (ctx, { sessionId, docs }) => {
+  ownedSession(ctx, sessionId);
+  for (const d of docs) ctx.db.resourceDoc.insert({ id: 0n, sessionId, ...d });
+});
+
+export const saveSuggestions = spacetimedb.reducer(
+  { sessionId: t.u64(), eventId: t.u64(), items: t.array(SuggestionInput) },
+  (ctx, { sessionId, eventId, items }) => {
+    ownedSession(ctx, sessionId);
+    for (const it of items) ctx.db.suggestion.insert({ id: 0n, sessionId, eventId, ...it, ts: ctx.timestamp });
   }
 );
 

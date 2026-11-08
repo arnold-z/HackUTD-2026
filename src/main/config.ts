@@ -30,6 +30,11 @@ export const config = {
   spectrumProjectId: env('SPECTRUM_PROJECT_ID'),
   spectrumProjectSecret: env('SPECTRUM_PROJECT_SECRET'),
   userPhone: env('USER_PHONE'),
+  // Embeddings for the resource folder (RAG). Same NVIDIA key/endpoint unless overridden.
+  embedBaseUrl: env('EMBED_BASE_URL', env('LLM_BASE_URL', 'https://integrate.api.nvidia.com/v1')).replace(/\/$/, ''),
+  embedApiKey: env('EMBED_API_KEY', env('LLM_API_KEY')),
+  embedModel: env('EMBED_MODEL', 'nvidia/nemotron-3.5-embed-8b'),
+  dwellMs: Number(env('SUGGEST_DWELL_MS', '5000')),
   stdbUri: env('STDB_URI', 'ws://127.0.0.1:3000'),
   stdbDatabase: env('STDB_DATABASE', 'anchor'),
   pollMs: Number(env('POLL_MS', '1000')),

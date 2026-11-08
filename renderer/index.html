@@ -66,6 +66,12 @@
             </div>
             <input id="minutes" type="number" min="1" max="600" value="25" aria-label="Minutes" />
           </div>
+          <label class="field">Resources for this session <span class="optional">optional</span></label>
+          <div class="inline">
+            <button id="pickFolder" class="btn">Choose folder…</button>
+            <span class="folder" id="folderLabel">Notes, slides, PDFs or code that might help. Anchor suggests files when you stay on a window.</span>
+            <button id="clearFolder" class="btn hidden">Remove</button>
+          </div>
           <label class="field" for="phone">Text alerts to</label>
           <input id="phone" type="tel" style="max-width: 240px" />
           <div class="actions">
@@ -102,6 +108,11 @@
               <div class="stat"><div class="v" id="mDrifts">–</div><div class="k">Drifts</div></div>
               <div class="stat"><div class="v" id="mReturn">–</div><div class="k">Average return</div></div>
             </div>
+          </div>
+
+          <div class="section hidden" id="resourcesSection">
+            <h2>Helpful files <small id="resStatus"></small></h2>
+            <div class="group" id="suggestions"></div>
           </div>
 
           <div class="section">

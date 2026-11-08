@@ -1,5 +1,5 @@
 // Anchor Electron main process.
-import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences, shell, desktopCapturer } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences, shell, desktopCapturer, Notification } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, config } from './config.js';
@@ -8,6 +8,8 @@ import { getFrontWindow, activateWindow, type FrontWindow } from './mac.js';
 import { Agent, isContentApp } from './agent.js';
 import { captureScreenForModel, screenFingerprint, fingerprintDiff, screenAccess } from './capture.js';
 import { initPhoton, photonStatus, photonError, stopPhoton } from './photon.js';
+import { ResourceIndex } from './rag.js';
+import { embedStatus } from './llm.js';
 
 const RENDERER = join(ROOT, 'renderer');
 const PRELOAD = join(ROOT, 'renderer', 'preload.cjs');
@@ -38,6 +40,10 @@ let candidateSince = 0;
 let contentCandidate: Uint8Array | null = null;
 let contentSince = 0;
 const FP_CHANGE = 0.02; // share of pixels that must change to count as different content (another note)
+// Resource folder (RAG) for the current session.
+let resources: ResourceIndex | undefined;
+let resourcesForSession: bigint | undefined;
+let suggestedForEvent: bigint | undefined;
 let lastOnTask: { app: string; pid: number; url: string; title: string; noteId?: string } | undefined;
 
 // Where "Back" should go: the most recent window whose *latest* verdict is still on task, never
@@ -416,7 +422,48 @@ async function tick() {
       console.error('[watcher] logActivity failed', err?.message ?? err);
     }
   }
+  maybeSuggest(s.id);
   enforceFocus();
+}
+
+// After the user has stayed on an on-task window for a few seconds, ask the agent which files
+// from the session's resource folder could help with it (once per window).
+function maybeSuggest(sessionId: bigint) {
+  if (!conn || !resources?.ready || resourcesForSession !== sessionId) return;
+  const s = conn.db.session.id.find(sessionId);
+  if (!s || s.latestEventId === suggestedForEvent || openIntervention(conn, sessionId)) return;
+  const latest = conn.db.activityEvent.id.find(s.latestEventId);
+  if (!latest || latest.verdict !== 'on_task' || Date.now() - lastLoggedAt < config.dwellMs) return;
+  if (candidateKey && candidateKey !== lastKey) return; // still moving between windows
+  suggestedForEvent = s.latestEventId;
+  conn.reducers.requestSuggestions({ sessionId, eventId: s.latestEventId }).catch((e) => console.error('[suggest]', e?.message ?? e));
+}
+
+function notifySuggestions(items: { path: string; name: string; why: string }[]) {
+  if (!items.length || !Notification.isSupported()) return;
+  const [first, ...rest] = items;
+  const n = new Notification({
+    title: rest.length ? `${items.length} files from your resources may help` : 'This file may help',
+    subtitle: first.name,
+    body: `${first.why}${rest.length ? `\nAlso: ${rest.map((r) => r.name).join(', ')}` : ''}`,
+  });
+  n.on('click', () => {
+    if (resources?.has(first.path)) shell.openPath(first.path);
+  });
+  n.show();
+}
+
+async function startIndexing(sessionId: bigint, folder?: string, files?: string[]) {
+  resources = new ResourceIndex(join(app.getPath('userData'), 'embeddings'), pushState);
+  resourcesForSession = sessionId;
+  suggestedForEvent = undefined;
+  const results = folder ? await resources.indexFolder(folder) : await resources.indexFiles(files ?? []);
+  console.log(`[resources] ${resources.status.state}: ${resources.chunks.length} passages from ${results.filter((r) => r.status === 'indexed').length} files${resources.status.error ? ' (' + resources.status.error + ')' : ''}`);
+  if (folder && conn && results.length) {
+    const docs = results.map((r) => ({ path: r.path, name: r.name, chunks: r.chunks, status: r.status, detail: r.detail }));
+    for (let i = 0; i < docs.length; i += 50) await conn.reducers.saveResourceDocs({ sessionId, docs: docs.slice(i, i + 50) }).catch(() => {});
+  }
+  pushState();
 }
 
 function startWatcher() {
@@ -542,15 +589,48 @@ function snapshot() {
     })),
     metrics: agent ? agent.metricsFor(s.id) : null,
     summary: summary ? { text: summary.text, sent: summary.sent } : null,
+    resources:
+      resources && resourcesForSession === s.id
+        ? { ...resources.status, embedModel: embedStatus.model, embedError: embedStatus.ok ? '' : embedStatus.error }
+        : null,
+    suggestions: [...conn.db.suggestion.iter()]
+      .filter((x) => x.sessionId === s.id)
+      .sort((a, b) => (a.id < b.id ? 1 : -1))
+      .slice(0, 8)
+      .map((x) => ({ id: x.id.toString(), path: x.path, name: x.name, why: x.why, score: x.score, tsMs: micros(x.ts) })),
   };
 }
 
 // ---------------- IPC ----------------
-ipcMain.handle('start-session', async (_e, args: { goal: string; minutes: number; phone: string }) => {
+ipcMain.handle('start-session', async (_e, args: { goal: string; minutes: number; phone: string; folder?: string }) => {
   if (!conn) throw new Error('Not connected to SpacetimeDB yet');
   lastKey = '';
   lastOnTask = undefined;
+  const before = activeSession(conn)?.id;
   await conn.reducers.startSession({ goal: String(args.goal), minutes: Math.round(Number(args.minutes) || 30), phone: String(args.phone || config.userPhone) });
+  resources = undefined;
+  resourcesForSession = undefined;
+  if (args.folder) {
+    // Wait for the new session row, then index the folder in the background.
+    for (let i = 0; i < 40; i++) {
+      const s = activeSession(conn);
+      if (s && s.id !== before) {
+        startIndexing(s.id, String(args.folder));
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  return true;
+});
+
+ipcMain.handle('pick-folder', async () => {
+  const r = await dialog.showOpenDialog(mainWin!, { properties: ['openDirectory'], title: 'Choose a folder of resources for this session' });
+  return r.canceled ? null : r.filePaths[0];
+});
+
+ipcMain.handle('open-resource', async (_e, path: string) => {
+  if (resources?.has(path)) await shell.openPath(path);
   return true;
 });
 
@@ -672,9 +752,15 @@ app.whenReady().then(() => {
     // One saved identity per server+database, so switching between local and Maincloud just works.
     join(app.getPath('userData'), `stdb-token-${(config.stdbUri + '-' + config.stdbDatabase).replace(/[^a-z0-9]+/gi, '_')}`),
     (c) => {
-      agent = new Agent(c, pushState, captureScreenForModel);
+      agent = new Agent(c, pushState, captureScreenForModel, { resources: () => resources, notify: notifySuggestions });
+      // After a restart mid-session, rebuild the index from the files recorded for it (cached vectors make this quick).
+      const running = activeSession(c);
+      if (running) {
+        const files = [...c.db.resourceDoc.iter()].filter((d) => d.sessionId === running.id && d.status === 'indexed').map((d) => d.path);
+        if (files.length) startIndexing(running.id, undefined, files);
+      }
       agent.start();
-      const tables = [c.db.session, c.db.activityEvent, c.db.intervention, c.db.agentTrace, c.db.agentJob, c.db.relevanceRule, c.db.sessionSummary] as const;
+      const tables = [c.db.session, c.db.activityEvent, c.db.intervention, c.db.agentTrace, c.db.agentJob, c.db.relevanceRule, c.db.sessionSummary, c.db.suggestion, c.db.resourceDoc] as const;
       for (const t of tables) {
         (t as any).onInsert(() => onDbChange());
         (t as any).onUpdate?.(() => onDbChange());

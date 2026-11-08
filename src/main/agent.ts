@@ -9,6 +9,7 @@ import { micros, sessionEvents, sessionInterventions, sessionRules } from './db.
 import { chat, extractJson, hasImages, withoutImages, type ChatMessage, type ToolSpec } from './llm.js';
 import { computeMetrics, type Metrics } from './metrics.js';
 import { sendText } from './photon.js';
+import type { ResourceIndex } from './rag.js';
 
 type Job = NonNullable<ReturnType<Conn['db']['agentJob']['id']['find']>>;
 type Session = NonNullable<ReturnType<Conn['db']['session']['id']['find']>>;
@@ -32,13 +33,26 @@ function hostOf(url: string) {
 
 export type AgentStatus = { llm: 'unknown' | 'ok' | 'error'; llmError: string; lastLatencyMs: number };
 
+export interface Agent {
+  suggest(job: Job): Promise<void>;
+}
 export class Agent {
   status: AgentStatus = { llm: 'unknown', llmError: '', lastLatencyMs: 0 };
   private fastLane: Promise<void> = Promise.resolve();
   private msgLane: Promise<void> = Promise.resolve();
   private seen = new Set<string>();
 
-  constructor(private conn: Conn, private onChange: () => void, private capture?: () => Promise<string | null>) {}
+  private suggestLane: Promise<void> = Promise.resolve();
+
+  constructor(
+    private conn: Conn,
+    private onChange: () => void,
+    private capture?: () => Promise<string | null>,
+    private extras: {
+      resources?: () => ResourceIndex | undefined;
+      notify?: (items: { path: string; name: string; why: string }[]) => void;
+    } = {}
+  ) {}
 
   start() {
     this.conn.db.agentJob.onInsert((_ctx, job) => this.enqueue(job));
@@ -53,7 +67,8 @@ export class Agent {
     if (!s || (this.conn.identity && !s.owner.isEqual(this.conn.identity))) return;
     this.seen.add(key);
     const run = () => this.run(job).catch((e) => console.error('[agent] job failed', job.kind, e));
-    if (job.kind === 'alert' || job.kind === 'debrief') this.msgLane = this.msgLane.then(run);
+    if (job.kind === 'suggest') this.suggestLane = this.suggestLane.then(run);
+    else if (job.kind === 'alert' || job.kind === 'debrief') this.msgLane = this.msgLane.then(run);
     else this.fastLane = this.fastLane.then(run);
   }
 
@@ -64,6 +79,7 @@ export class Agent {
       else if (job.kind === 'judge') await this.judge(job);
       else if (job.kind === 'alert') await this.alert(job);
       else if (job.kind === 'debrief') await this.debrief(job);
+      else if (job.kind === 'suggest') await this.suggest(job);
       await this.setJob(job, 'done');
     } catch (err: any) {
       console.error(`[agent] ${job.kind} error:`, err?.message ?? err);
@@ -471,6 +487,92 @@ Guidelines:
     await this.conn.reducers.saveSummary({ sessionId: s.id, metricsJson: JSON.stringify(m), text, sent: res.ok });
   }
 }
+
+// ---------------- Suggest (RAG over the session's resource folder) ----------------
+// Runs after the user has stayed on an on-task window for a few seconds.
+Agent.prototype.suggest = async function (this: Agent, job: Job) {
+  const self = this as any;
+  const index: ResourceIndex | undefined = self.extras.resources?.();
+  if (!index?.ready) {
+    await self.trace(job, 1, 'skip', '', 'no resource folder indexed for this session');
+    return;
+  }
+  const s = self.session(job) as Session;
+  const ev = self.conn.db.activityEvent.id.find(job.eventId) as Event | undefined;
+  if (!ev || s.status !== 'active' || s.latestEventId !== ev.id) return; // user already moved on
+
+  // 1. What is the user looking at? Browser: page text. Other apps: a short screen description.
+  let context = '';
+  if (ev.url) {
+    context = await fetchPageSummary(ev.url);
+    await self.trace(job, null, 'fetch_page_summary', JSON.stringify({ url: ev.url }), context.slice(0, 300));
+  } else if (self.capture) {
+    const shot: string | null = await self.capture();
+    if (shot) {
+      try {
+        const r = await self.llm(
+          [{ role: 'user', content: [
+            { type: 'text', text: 'In 2-3 sentences, describe what the user is reading or working on in the frontmost window. Name the specific topics, terms, functions or errors visible. No preamble.' },
+            { type: 'image_url', image_url: { url: shot } },
+          ] }],
+          { maxTokens: 200, timeoutMs: 45_000 }
+        );
+        context = r.content.trim();
+        await self.trace(job, null, 'describe_screen', JSON.stringify({ app: ev.app }), context.slice(0, 300));
+      } catch (err: any) {
+        await self.trace(job, null, 'describe_screen', '', `failed: ${String(err?.message ?? err).slice(0, 120)}`);
+      }
+    }
+  }
+  const query = `${ev.app}: ${ev.title}${ev.url ? ` (${ev.url})` : ''}\n${context}\nGoal: ${s.goal}`.slice(0, 4000);
+
+  // 2. Retrieve passages with Nemotron embeddings, best passage per file.
+  const hits = await index.search(query, 16);
+  const byFile = new Map<string, (typeof hits)[number]>();
+  for (const h of hits) if (!byFile.has(h.path)) byFile.set(h.path, h);
+  const candidates = [...byFile.values()].slice(0, 5);
+  await self.trace(job, null, 'search_resources', JSON.stringify({ query: query.slice(0, 160) }), candidates.map((c) => `${c.name} (${c.score.toFixed(2)})`).join(', ') || 'no matches');
+  if (!candidates.length) return;
+
+  // Don't repeat a file suggested in the last 10 minutes of this session.
+  const recent = new Set(
+    [...self.conn.db.suggestion.iter()]
+      .filter((x: any) => x.sessionId === s.id && Date.now() - micros(x.ts) < 10 * 60_000)
+      .map((x: any) => x.path)
+  );
+  const fresh = candidates.filter((c) => !recent.has(c.path));
+  if (!fresh.length) {
+    await self.trace(job, null, 'skip', '', 'best matches were already suggested recently');
+    return;
+  }
+
+  // 3. Nemotron decides which files actually help with what is on screen right now.
+  const list = fresh.map((c, i) => `[${i + 1}] ${c.name} (similarity ${c.score.toFixed(2)})\n${c.snippet.slice(0, 500)}`).join('\n\n');
+  let picks: { n: number; why: string }[] = [];
+  try {
+    const r = await self.llm(
+      [{
+        role: 'user',
+        content: `A student working toward "${s.goal}" is looking at:\n${ev.app}: ${ev.title}\n${context.slice(0, 800)}\n\nCandidate files from their own resource folder:\n\n${list}\n\nWhich files would genuinely help with what they are looking at right now? Pick at most 2, or none if nothing clearly helps. Return ONLY JSON: {"picks":[{"n":<number>,"why":"<under 90 characters, specific: what in the file helps>"}]}`,
+      }],
+      { maxTokens: 300 }
+    );
+    const j = extractJson(r.content);
+    if (Array.isArray(j?.picks)) picks = j.picks.filter((p: any) => Number.isInteger(p?.n) && p.n >= 1 && p.n <= fresh.length);
+    await self.trace(job, null, 'nemotron.pick', '', picks.length ? picks.map((p) => `${fresh[p.n - 1].name}: ${p.why}`).join(' | ') : 'nothing clearly helpful');
+  } catch (err: any) {
+    // LLM down: fall back to the single strongest match if it is clearly similar.
+    if (fresh[0].score >= 0.45) picks = [{ n: 1, why: 'Closest match in your resources' }];
+    await self.trace(job, null, 'nemotron.pick', '', `failed (${String(err?.message ?? err).slice(0, 80)}); ${picks.length ? 'using top match' : 'no suggestion'}`);
+  }
+  if (!picks.length) return;
+  const items = picks.slice(0, 2).map((p) => {
+    const c = fresh[p.n - 1];
+    return { path: c.path, name: c.name, why: String(p.why || '').slice(0, 140), score: c.score };
+  });
+  await self.conn.reducers.saveSuggestions({ sessionId: s.id, eventId: ev.id, items });
+  self.extras.notify?.(items);
+};
 
 function fallbackProfile(goal: string) {
   const stop = new Set(['finish', 'complete', 'assignment', 'homework', 'about', 'which', 'their', 'there', 'these', 'study', 'write', 'working']);

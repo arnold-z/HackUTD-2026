@@ -54,6 +54,15 @@ export const AlertCheck = __t.object("AlertCheck", {
 });
 export type AlertCheck = __Infer<typeof AlertCheck>;
 
+export const DocInput = __t.object("DocInput", {
+  path: __t.string(),
+  name: __t.string(),
+  chunks: __t.u32(),
+  status: __t.string(),
+  detail: __t.string(),
+});
+export type DocInput = __Infer<typeof DocInput>;
+
 export const Intervention = __t.object("Intervention", {
   id: __t.u64(),
   sessionId: __t.u64(),
@@ -75,6 +84,17 @@ export const RelevanceRule = __t.object("RelevanceRule", {
   source: __t.string(),
 });
 export type RelevanceRule = __Infer<typeof RelevanceRule>;
+
+export const ResourceDoc = __t.object("ResourceDoc", {
+  id: __t.u64(),
+  sessionId: __t.u64(),
+  path: __t.string(),
+  name: __t.string(),
+  chunks: __t.u32(),
+  status: __t.string(),
+  detail: __t.string(),
+});
+export type ResourceDoc = __Infer<typeof ResourceDoc>;
 
 export const RuleInput = __t.object("RuleInput", {
   kind: __t.string(),
@@ -112,4 +132,24 @@ export const SessionTimer = __t.object("SessionTimer", {
   sessionId: __t.u64(),
 });
 export type SessionTimer = __Infer<typeof SessionTimer>;
+
+export const Suggestion = __t.object("Suggestion", {
+  id: __t.u64(),
+  sessionId: __t.u64(),
+  eventId: __t.u64(),
+  path: __t.string(),
+  name: __t.string(),
+  why: __t.string(),
+  score: __t.f32(),
+  ts: __t.timestamp(),
+});
+export type Suggestion = __Infer<typeof Suggestion>;
+
+export const SuggestionInput = __t.object("SuggestionInput", {
+  path: __t.string(),
+  name: __t.string(),
+  why: __t.string(),
+  score: __t.f32(),
+});
+export type SuggestionInput = __Infer<typeof SuggestionInput>;
 

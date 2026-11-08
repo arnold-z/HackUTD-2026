@@ -61,6 +61,18 @@ open /Applications/Anchor.app
 
 The app reads its settings from the `.env` bundled at build time, so re-run `npm run package:mac` after editing `.env`. Because it's a new app to macOS, grant **Anchor** Accessibility and Automation permissions again (System Settings → Privacy & Security). Each rebuild gets a new signature, so you may need to toggle those permissions off and on after rebuilding. Logs: `~/Library/Logs/Anchor/main.log`.
 
+## Resource folder suggestions (RAG)
+
+On the start screen, **Choose folder…** to give Anchor notes, slides, PDFs, Word files, notebooks or code for this session. Anchor reads them (up to 150 files), splits them into passages and embeds them with **Nemotron 3.5 Embed 8B** (`EMBED_MODEL` in `.env`, default `nvidia/nemotron-3.5-embed-8b`). Vectors are cached in Anchor's app data, so unchanged files are never re-embedded.
+
+When you stay on an on-task window for 5 seconds (`SUGGEST_DWELL_MS`), the agent:
+1. Describes what you're looking at (page text for browsers, a screenshot description from Nemotron Omni for other apps).
+2. Searches your folder with the embedding of that description.
+3. Lets Nemotron pick the files that genuinely help (or none) and say why.
+4. Shows a macOS notification. Click it to open the file. Suggestions also appear under **Helpful files**.
+
+Each file is suggested at most once every 10 minutes. `npm run smoke` checks the embedding model id; if NVIDIA lists it under another id, set `EMBED_MODEL`.
+
 ## How it works
 
 | Part | Where | What it does |

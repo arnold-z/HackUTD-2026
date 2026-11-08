@@ -14,7 +14,8 @@ const timeOf = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', mi
 const host = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const VERDICT = { on_task: 'On task', off_task: 'Off task', pending: 'Checking…' };
-const WHO = { judge: 'Judge', profile: 'Setup', alert: 'Alert', debrief: 'Summary' };
+const WHO = { judge: 'Judge', profile: 'Setup', alert: 'Alert', debrief: 'Summary', suggest: 'Resources' };
+let folder = '';
 
 function status(id, cls, text) {
   const el = $(id);
@@ -120,6 +121,8 @@ function render(st) {
         .join('')
     : '<div class="empty">Windows you switch to will be listed here.</div>';
 
+  renderResources(st);
+
   $('rules').innerHTML = s.rules.length
     ? s.rules.map((r) => `<span class="chip ${r.verdict}" title="${r.verdict === 'on_task' ? 'Counts as on task' : 'Counts as off task'}">${esc(r.pattern)}</span>`).join('')
     : '<span class="empty" style="padding:0">Setting up rules from your goal…</span>';
@@ -158,6 +161,42 @@ function renderPermissions(p) {
   for (const b of $('permRows').querySelectorAll('[data-restart]')) b.addEventListener('click', () => window.fg.restartApp());
 }
 
+// Resource folder: indexing status and the files the agent suggested.
+function renderResources(st) {
+  const r = st.resources;
+  const list = st.suggestions || [];
+  $('resourcesSection').classList.toggle('hidden', !r && !list.length);
+  if (!r && !list.length) return;
+  let status = '';
+  if (r) {
+    if (r.state === 'indexing') status = `Reading ${r.done} of ${r.files} files…`;
+    else if (r.state === 'ready') status = `${r.files} files, ${r.chunks} passages indexed`;
+    else if (r.state === 'error') status = `Couldn't index: ${r.embedError || r.error}`;
+  }
+  $('resStatus').textContent = status;
+  $('suggestions').innerHTML = list.length
+    ? list
+        .map((x) => `<div class="row"><div class="main"><div class="title">${esc(x.name)}</div><div class="detail" title="${esc(x.why)}">${esc(x.why)}</div></div><span class="time">${timeOf(x.tsMs)}</span><button class="btn" data-open="${esc(x.path)}">Open</button></div>`)
+        .join('')
+    : `<div class="empty">${r && r.state === 'ready' ? `Stay on a window for ${5} seconds and Anchor suggests files from your folder that could help.` : r && r.state === 'indexing' ? 'Reading your files…' : 'No suggestions yet.'}</div>`;
+  for (const b of $('suggestions').querySelectorAll('[data-open]')) b.addEventListener('click', () => window.fg.openResource(b.dataset.open));
+}
+
+$('pickFolder').addEventListener('click', async () => {
+  const p = await window.fg.pickFolder();
+  if (!p) return;
+  folder = p;
+  $('folderLabel').textContent = p.replace(/^\/Users\/[^/]+/, '~');
+  $('folderLabel').classList.add('set');
+  $('clearFolder').classList.remove('hidden');
+});
+$('clearFolder').addEventListener('click', () => {
+  folder = '';
+  $('folderLabel').textContent = 'Notes, slides, PDFs or code that might help. Anchor suggests files when you stay on a window.';
+  $('folderLabel').classList.remove('set');
+  $('clearFolder').classList.add('hidden');
+});
+
 // Length presets
 for (const b of $('lengths').querySelectorAll('button')) {
   b.addEventListener('click', () => {
@@ -177,7 +216,7 @@ $('startBtn').addEventListener('click', async () => {
   if (!goal) return $('goal').focus();
   $('startBtn').disabled = true;
   try {
-    await window.fg.startSession(goal, Number($('minutes').value) || 25, $('phone').value.trim());
+    await window.fg.startSession(goal, Number($('minutes').value) || 25, $('phone').value.trim(), folder || undefined);
     $('goal').value = '';
   } catch (e) {
     alert(e.message || e);

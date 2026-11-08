@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>FocusGuard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Focus<b>Guard</b></div>
+    <div class="pills">
+      <span class="pill" id="pill-db"><i></i>SpacetimeDB</span>
+      <span class="pill" id="pill-llm"><i></i>Nemotron</span>
+      <span class="pill" id="pill-photon"><i></i>iMessage</span>
+    </div>
+  </header>
+  <div id="banner" class="banner hidden"></div>
+
+  <!-- Start screen -->
+  <section id="start" class="start">
+    <div class="eyebrow">New focus session</div>
+    <h1>What are you finishing?</h1>
+    <p class="lead">A Nemotron agent judges every window you switch to. Drift off-task and the screen locks until you go back. Stay off for 10 seconds and it texts you.</p>
+    <label for="goal">End goal</label>
+    <textarea id="goal" placeholder="Finish CS 3345 Assignment 4: implement Dijkstra in Python"></textarea>
+    <div class="row">
+      <div><label for="minutes">Minutes</label><input id="minutes" type="number" min="1" max="600" value="30" /></div>
+      <div><label for="phone">iMessage alerts to</label><input id="phone" type="tel" /></div>
+    </div>
+    <button id="startBtn" class="btn primary">Start focus session</button>
+    <div class="hint">Ending early requires typing the phrase “i am done focusing”.</div>
+    <div id="lastDebrief" class="debrief hidden"><h3>Last session debrief</h3><div id="lastDebriefText"></div></div>
+  </section>
+
+  <!-- Active session -->
+  <section id="session" class="session hidden">
+    <div class="col">
+      <div class="card">
+        <h2>Goal</h2>
+        <div class="goal" id="sGoal"></div>
+        <div class="progress"><div id="sProgress"></div></div>
+        <div class="clock"><span id="sElapsed"></span><span id="sLeft"></span></div>
+      </div>
+      <div class="card" id="currentCard">
+        <h2>Current window <span id="cVerdict" class="verdict pending">waiting</span></h2>
+        <div class="window-title" id="cTitle">—</div>
+        <div class="window-sub" id="cSub"></div>
+        <div class="reason" id="cReason"></div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="v" id="mScore">—</div><div class="k">Focus score</div></div>
+        <div class="metric"><div class="v" id="mOn">—</div><div class="k">On-task</div></div>
+        <div class="metric"><div class="v" id="mDrifts">—</div><div class="k">Drifts</div></div>
+        <div class="metric"><div class="v" id="mReturn">—</div><div class="k">Avg return</div></div>
+      </div>
+      <div class="card grow">
+        <h2>Windows this session</h2>
+        <div class="list" id="events"></div>
+      </div>
+      <div class="card">
+        <h2>End session</h2>
+        <div class="endbox">
+          <input id="endPhrase" type="text" placeholder="Type: i am done focusing" />
+          <button id="endBtn" class="btn">End</button>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card grow">
+        <h2>Agent trace <span class="model" id="latency"></span></h2>
+        <div class="list trace" id="trace"></div>
+      </div>
+      <div class="card">
+        <h2>Learned rules</h2>
+        <div class="chips" id="rules"></div>
+      </div>
+    </div>
+  </section>
+  <script src="app.js"></script>
+</body>
+</html>

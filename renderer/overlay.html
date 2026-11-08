@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>FocusGuard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="overlay">
+  <main class="ov">
+    <div class="eyebrow">Off task</div>
+    <h1>This isn't what you came here to do.</h1>
+    <p class="goalline">You're working on <span id="goal"></span></p>
+    <div class="what" id="what"></div>
+    <div class="why" id="why"></div>
+    <button id="back" class="btn primary back">Back to work</button>
+    <div class="alert" id="alert"></div>
+  </main>
+  <div class="escape">
+    <a id="showEnd">End session</a>
+    <div class="endbox hidden" id="endBox">
+      <input id="endPhrase" type="text" placeholder="Type: i am done focusing" />
+      <button id="endBtn" class="btn">End</button>
+    </div>
+  </div>
+  <script src="overlay.js"></script>
+</body>
+</html>

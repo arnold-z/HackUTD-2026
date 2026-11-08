@@ -39,6 +39,33 @@ let contentCandidate: Uint8Array | null = null;
 let contentSince = 0;
 const FP_CHANGE = 0.02; // share of pixels that must change to count as different content (another note)
 let lastOnTask: { app: string; pid: number; url: string; title: string; noteId?: string } | undefined;
+
+// Where "Back" should go: the most recent window whose *latest* verdict is still on task, never
+// the window you're blocked on, preferring windows the agent was confident about. Computed fresh,
+// because a window first allowed (e.g. while unsure) can later be judged off task.
+function backTarget(): typeof lastOnTask {
+  if (!conn) return lastOnTask;
+  const s = activeSession(conn);
+  if (!s) return lastOnTask;
+  const events = sessionEvents(conn, s.id);
+  const current = conn.db.activityEvent.id.find(s.latestEventId);
+  const currentKey = current ? keyOf(current) : '';
+  const latestByKey = new Map<string, (typeof events)[number]>();
+  for (const e of events) latestByKey.set(keyOf(e), e); // events are oldest -> newest
+  let fallback: (typeof events)[number] | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    const k = keyOf(e);
+    if (k === currentKey || latestByKey.get(k) !== e || e.verdict !== 'on_task') continue;
+    if (e.confidence >= 0.6) return toTarget(e);
+    fallback ??= e;
+  }
+  return fallback ? toTarget(fallback) : undefined;
+}
+function toTarget(e: { app: string; title: string; url: string }) {
+  const k = keyOf(e);
+  return { app: e.app, title: e.title, url: e.url, pid: pidByKey.get(k) ?? 0, noteId: noteIdByKey.get(k) };
+}
 const noteIdByKey = new Map<string, string>(); // Apple Notes: window key -> note id, for Back
 
 const keyOf = (w: { app: string; title: string; url: string }) => `${w.app}\u0001${w.title}\u0001${w.url}`;
@@ -499,7 +526,10 @@ function snapshot() {
     intervention: iv
       ? { id: iv.id.toString(), distraction: iv.distraction, reason: iv.reason, shownMs: micros(iv.shownAt), alerted: iv.alerted }
       : null,
-    backTo: lastOnTask ? { app: lastOnTask.app, title: lastOnTask.title, url: lastOnTask.url } : null,
+    backTo: (() => {
+      const b = backTarget();
+      return b ? { app: b.app, title: b.title, url: b.url } : null;
+    })(),
     trace: traces.map((t) => ({
       id: t.id.toString(),
       jobId: t.jobId.toString(),
@@ -535,7 +565,7 @@ ipcMain.handle('end-session', async (_e, args: { phrase: string }) => {
 });
 
 ipcMain.handle('go-back', async () => {
-  const target = lastOnTask;
+  const target = backTarget();
   const s = conn ? activeSession(conn) : undefined;
   const offEvent = s && conn ? conn.db.activityEvent.id.find(s.latestEventId) : undefined;
   if (offEvent && isContentApp(offEvent.app)) contentGrace();

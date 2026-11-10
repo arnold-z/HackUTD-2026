@@ -2,12 +2,14 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('fg', {
-  startSession: (goal, minutes, phone, folder) => ipcRenderer.invoke('start-session', { goal, minutes, phone, folder }),
-  pickFolder: () => ipcRenderer.invoke('pick-folder'),
-  openResource: (path) => ipcRenderer.invoke('open-resource', path),
+  startSession: (goal, minutes, phone) => ipcRenderer.invoke('start-session', { goal, minutes, phone }),
   endSession: (phrase) => ipcRenderer.invoke('end-session', { phrase }),
-  goBack: () => ipcRenderer.invoke('go-back'),
+  goBack: (separate) => ipcRenderer.invoke('go-back', { separate: !!separate }),
+  setSetting: (key, value) => ipcRenderer.invoke('set-setting', { key, value }),
   getState: () => ipcRenderer.invoke('get-state'),
+  pauseChallenge: () => ipcRenderer.invoke('pause-challenge'),
+  pauseSubmit: (typed) => ipcRenderer.invoke('pause-submit', typed),
+  resumeSession: () => ipcRenderer.invoke('resume-session'),
   openPermission: (kind) => ipcRenderer.invoke('open-permission', kind),
   restartApp: () => ipcRenderer.invoke('restart-app'),
   onState: (cb) => {

@@ -71,30 +71,70 @@ return ""`, 1500);
   }
 }
 
+const idByName = new Map<string, string>();
+export async function noteIdByName(name: string): Promise<string> {
+  if (!notesScriptingWorks) return '';
+  if (idByName.has(name)) return idByName.get(name)!;
+  try {
+    const id = await osa(`tell application "Notes"
+  try
+    return id of first note whose name is ${q(name)}
+  end try
+  try
+    return id of first note whose name starts with ${q(name.slice(0, 40))}
+  end try
+end tell
+return ""`, 2500);
+    if (id) idByName.set(name, id);
+    return id;
+  } catch {
+    return '';
+  }
+}
+
 export async function getFrontWindow(): Promise<FrontWindow> {
   const out = await osa(FRONT_SCRIPT);
   const [app = '', pid = '0', title = ''] = out.split(SEP);
   const url = await browserUrl(app);
   if (app === 'Notes') {
+    // A note opened in its own window: the window is named after the note, while Notes'
+    // "selection" still reports whatever is selected in the main window. Trust the window.
+    if (title && title !== 'Notes') {
+      const id = await noteIdByName(title);
+      return { app, pid: Number(pid), title, url, noteId: id || undefined };
+    }
     const note = await selectedNote();
     if (note.name) return { app, pid: Number(pid), title: note.name, url, noteId: note.id || undefined };
   }
   return { app, pid: Number(pid), title, url };
 }
 
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 // Bring a window back: the app by pid, and for browsers the exact tab by URL.
-export async function activateWindow(w: { app: string; pid: number; url: string; noteId?: string }): Promise<void> {
+export async function activateWindow(w: { app: string; pid: number; url: string; title?: string; noteId?: string }, opts: { separate?: boolean } = {}): Promise<void> {
   // A specific Apple Note: open that exact note, not just the Notes app.
+  if (w.app === 'Notes' && !w.noteId && w.title) {
+    // Back target known by the title read on screen: look the note up by name.
+    const found = await noteIdByName(w.title);
+    console.log(`[go-back] note "${w.title}" -> ${found ? 'found' : 'not found'}`);
+    if (found) w = { ...w, noteId: found };
+  }
   if (w.app === 'Notes' && w.noteId) {
+    const id = q(w.noteId);
+    // Main window: switch the note inside the normal Notes window. Own window: open it isolated.
     try {
       await osa(`tell application "Notes"
-  show note id ${q(w.noteId)}
   activate
-end tell`, 4000);
-      return;
+  show note id ${id} ${opts.separate ? 'with' : 'without'} separately
+end tell`, 5000);
+      console.log(`[go-back] asked Notes to open the note ${opts.separate ? 'in its own window' : 'in the main window'}`);
     } catch (err: any) {
-      console.error('[go-back] could not open the note:', err?.message ?? err);
+      console.error('[go-back] could not show the note:', err?.message ?? err);
     }
+    // Notes' reported selection is unreliable, so don't check it: the watcher re-judges what is
+    // actually on screen from a screenshot during the grace period.
+    return;
   }
   if (w.url && CHROMIUM.includes(w.app)) {
     await osa(`

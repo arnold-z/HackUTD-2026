@@ -15,12 +15,21 @@ function render(st) {
   // Name the exact note or document when the app holds many (Notes, Pages, Word…).
   const doc = !b?.url && b?.title && b.title !== b.app ? `“${b.title.length > 32 ? b.title.slice(0, 31) + '…' : b.title}”` : '';
   $('back').textContent = b ? `Back to ${b.url ? host(b.url) || b.app : doc || b.app}` : 'Back to work';
+  // "Ask each time": offer both ways of reopening a note.
+  const ask = st.settings?.notesBack === 'ask' && b?.isNote;
+  $('backSeparate').classList.toggle('hidden', !ask);
 
   const elapsed = (Date.now() - iv.shownMs) / 1000;
   const arc = $('dialArc');
   arc.style.strokeDasharray = `${RING}`;
   const left = Math.max(0, 10 - elapsed);
-  if (iv.alerted || left === 0) {
+  if (!iv.alerted && !iv.counting) {
+    // Countdown paused (you clicked Back or switched windows): it restarts if the popup returns.
+    arc.style.strokeDashoffset = `${RING}`;
+    $('count').textContent = '10';
+    $('count').classList.remove('word');
+    $('countSub').textContent = 'until we text you';
+  } else if (iv.alerted || left === 0) {
     // Countdown finished: show a settled state instead of a running number.
     arc.style.strokeDashoffset = '0';
     $('count').textContent = iv.alerted ? 'Sent' : '…';
@@ -34,7 +43,8 @@ function render(st) {
   }
 }
 
-$('back').addEventListener('click', () => window.fg.goBack());
+$('back').addEventListener('click', () => window.fg.goBack(false));
+$('backSeparate').addEventListener('click', () => window.fg.goBack(true));
 $('showEnd').addEventListener('click', () => {
   $('endBox').classList.toggle('hidden');
   $('endPhrase').focus();

@@ -9,7 +9,6 @@ import { micros, sessionEvents, sessionInterventions, sessionRules } from './db.
 import { chat, extractJson, hasImages, withoutImages, type ChatMessage, type ToolSpec } from './llm.js';
 import { computeMetrics, type Metrics } from './metrics.js';
 import { sendText } from './photon.js';
-import type { ResourceIndex } from './rag.js';
 
 type Job = NonNullable<ReturnType<Conn['db']['agentJob']['id']['find']>>;
 type Session = NonNullable<ReturnType<Conn['db']['session']['id']['find']>>;
@@ -33,26 +32,35 @@ function hostOf(url: string) {
 
 export type AgentStatus = { llm: 'unknown' | 'ok' | 'error'; llmError: string; lastLatencyMs: number };
 
-export interface Agent {
-  suggest(job: Job): Promise<void>;
-}
 export class Agent {
   status: AgentStatus = { llm: 'unknown', llmError: '', lastLatencyMs: 0 };
   private fastLane: Promise<void> = Promise.resolve();
   private msgLane: Promise<void> = Promise.resolve();
   private seen = new Set<string>();
 
-  private suggestLane: Promise<void> = Promise.resolve();
+  // Notes/docs: the title Nemotron read off the screenshot, per event id. Notes' own reported
+  // note name can be stale, so Back uses this instead.
+  seenTitles = new Map<string, string>();
+  // Interventions the app texted about (the app decides when: 10 s of the popup on screen).
+  sentAlerts = new Set<string>();
 
-  constructor(
-    private conn: Conn,
-    private onChange: () => void,
-    private capture?: () => Promise<string | null>,
-    private extras: {
-      resources?: () => ResourceIndex | undefined;
-      notify?: (items: { path: string; name: string; why: string }[]) => void;
-    } = {}
-  ) {}
+  // Called by the app once the popup has stayed on screen for the full 10 seconds.
+  async sendAlertFor(interventionId: bigint) {
+    const key = interventionId.toString();
+    if (this.sentAlerts.has(key)) return;
+    const iv = this.conn.db.intervention.id.find(interventionId);
+    if (!iv || iv.resolvedAt !== undefined) return;
+    this.sentAlerts.add(key);
+    this.onChange();
+    const job = { id: 0n, sessionId: iv.sessionId, kind: 'alert', eventId: iv.eventId, interventionId: iv.id, status: 'running', createdAt: iv.shownAt } as unknown as Job;
+    try {
+      await this.alert(job);
+    } catch (err: any) {
+      console.error('[alert] failed:', err?.message ?? err);
+    }
+  }
+
+  constructor(private conn: Conn, private onChange: () => void, private capture?: () => Promise<string | null>) {}
 
   start() {
     this.conn.db.agentJob.onInsert((_ctx, job) => this.enqueue(job));
@@ -67,8 +75,7 @@ export class Agent {
     if (!s || (this.conn.identity && !s.owner.isEqual(this.conn.identity))) return;
     this.seen.add(key);
     const run = () => this.run(job).catch((e) => console.error('[agent] job failed', job.kind, e));
-    if (job.kind === 'suggest') this.suggestLane = this.suggestLane.then(run);
-    else if (job.kind === 'alert' || job.kind === 'debrief') this.msgLane = this.msgLane.then(run);
+    if (job.kind === 'alert' || job.kind === 'debrief') this.msgLane = this.msgLane.then(run);
     else this.fastLane = this.fastLane.then(run);
   }
 
@@ -77,14 +84,25 @@ export class Agent {
     try {
       if (job.kind === 'profile') await this.profile(job);
       else if (job.kind === 'judge') await this.judge(job);
-      else if (job.kind === 'alert') await this.alert(job);
+      else if (job.kind === 'alert') await this.trace(job, 1, 'skip', '', 'the app sends texts only after 10 s of the popup on screen');
       else if (job.kind === 'debrief') await this.debrief(job);
-      else if (job.kind === 'suggest') await this.suggest(job);
       await this.setJob(job, 'done');
     } catch (err: any) {
       console.error(`[agent] ${job.kind} error:`, err?.message ?? err);
       await this.trace(job, 99, 'error', '', String(err?.message ?? err));
       await this.setJob(job, 'failed');
+      // A judge that crashed must not leave the window "pending" forever (that kept stale blocks
+      // open). Allow it, like the blind case.
+      if (job.kind === 'judge') {
+        try {
+          const ev = this.conn.db.activityEvent.id.find(job.eventId);
+          if (ev && ev.verdict === 'pending') {
+            await this.conn.reducers.recordVerdict({ eventId: ev.id, verdict: 'on_task', reason: 'Allowed (unsure: the judge failed)', confidence: 0.3 });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
     } finally {
       this.onChange();
     }
@@ -250,6 +268,7 @@ Rules:
             verdict: { type: 'string', enum: ['on_task', 'off_task'] },
             reason: { type: 'string', description: 'One short sentence shown to the user.' },
             confidence: { type: 'number', description: '0 to 1' },
+            open_title: { type: 'string', description: 'When judging from a screenshot of a notes/docs app: the exact title (first line) of the note or document that is open on screen.' },
           },
           required: ['verdict', 'reason', 'confidence'],
         },
@@ -291,9 +310,12 @@ Guidelines:
       { role: 'system', content: system },
       { role: 'user', content: `New window to judge:\n${user}` },
     ];
+    let shotForTitle: string | null = null;
     // For apps whose title hides the content, look at the screen up front.
     if (isContentApp(ev.app) && this.capture) {
+      await new Promise((r) => setTimeout(r, 350)); // let a covering block hide first
       const shot = await this.capture();
+      shotForTitle = shot;
       await this.trace(job, null, 'capture_window', JSON.stringify({ app: ev.app, auto: true }), shot ? `screenshot attached (${Math.round((shot.length * 3) / 4 / 1024)} KB)` : 'no screenshot (grant Screen Recording permission)');
       if (!shot) {
         messages[1] = {
@@ -304,7 +326,10 @@ Guidelines:
         messages[1] = {
           role: 'user',
           content: [
-            { type: 'text', text: `New window to judge:\n${user}\nThe title doesn't show what's open, so here is a screenshot of the screen. Judge by its content.` },
+            {
+              type: 'text',
+              text: `New window to judge:\n${user}\nThe title may not match what is actually open (${ev.app} can report a stale note name), so here is a screenshot of the screen. Ignore the title and judge ONLY by the content of the note/document/chat that is open in it. Being in ${ev.app} is not evidence either way: ${ev.app} may be listed as an on-task app and other notes in it may have been on task earlier, but that says nothing about this one. If this note's topic is unrelated to the goal, it is off_task. In record_verdict, set open_title to the exact title of the note/document shown on screen.`,
+            },
             { type: 'image_url', image_url: { url: shot } },
           ],
         };
@@ -355,6 +380,23 @@ Guidelines:
         }
       }
     }
+    // Back needs the real title of an on-task note; if the judge didn't report it, ask once.
+    if (isContentApp(ev.app) && shotForTitle && !this.seenTitles.has(ev.id.toString())) {
+      try {
+        const r = await this.llm(
+          [{ role: 'user', content: [{ type: 'text', text: `This is a screenshot of ${ev.app}. Reply with only the exact title (first line) of the note or document that is open, nothing else.` }, { type: 'image_url', image_url: { url: shotForTitle } }] }],
+          { maxTokens: 40, timeoutMs: 20_000 }
+        );
+        const t = String(r.content || '').split('\n')[0].replace(/^["“']|["”']$/g, '').trim().slice(0, 200);
+        if (t) {
+          this.seenTitles.set(ev.id.toString(), t);
+          console.log(`[judge] on screen (title read): ${ev.app} / "${t}"`);
+          this.onChange();
+        }
+      } catch (err: any) {
+        console.error('[judge] could not read the title:', err?.message ?? err);
+      }
+    }
     ev = this.conn.db.activityEvent.id.find(job.eventId) ?? ev;
     if (!decided && ev.verdict === 'pending') {
       const host = hostOf(ev.url);
@@ -372,8 +414,11 @@ Guidelines:
         const recent = sessionEvents(this.conn, s.id)
           .slice(-8)
           .map((e) => ({ app: e.app, title: e.title.slice(0, 80), host: hostOf(e.url), verdict: e.verdict }));
+        const note = isContentApp(ev.app)
+          ? `Verdicts for other ${ev.app} notes/documents above do not apply to the current one: judge it by its own content.`
+          : undefined;
         const elapsed = Math.round((Date.now() - micros(s.startedAt)) / 60000);
-        return { text: JSON.stringify({ goal: s.goal, on_task_looks_like: this.profileSummary(s), minutes_elapsed: elapsed, minutes_planned: s.minutes, recent }) };
+        return { text: JSON.stringify({ goal: s.goal, on_task_looks_like: this.profileSummary(s), minutes_elapsed: elapsed, minutes_planned: s.minutes, recent, note }) };
       }
       case 'fetch_page_summary': {
         const url = String(args.url || ev.url || '');
@@ -385,7 +430,10 @@ Guidelines:
         return shot ? { text: 'Screenshot captured; it follows as an image.', image: shot } : { text: 'Screenshot unavailable (Screen Recording permission not granted). Judge from the title.' };
       }
       case 'lookup_rules': {
-        const rules = sessionRules(this.conn, s.id).map((r) => `${r.verdict} ${r.kind}:${r.pattern}`);
+        // App rules never decide notes/docs/chat apps (the content does), so don't show them here.
+        const rules = sessionRules(this.conn, s.id)
+          .filter((r) => !(isContentApp(ev.app) && r.kind === 'app'))
+          .map((r) => `${r.verdict} ${r.kind}:${r.pattern}`);
         return { text: rules.length ? rules.join('\n') : 'no rules yet' };
       }
       case 'save_rule': {
@@ -394,7 +442,10 @@ Guidelines:
         const verdict = String(args.verdict || '');
         if (kind === 'domain') pattern = pattern.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
         if (kind === 'keyword' && verdict === 'off_task') return { text: 'rejected: keyword rules are for on-task topics only' };
+        if (kind === 'app' && isContentApp(pattern)) return { text: `rejected: ${pattern} is judged note by note, not as a whole app` };
         if (pattern.length < 3) return { text: 'rejected: pattern too short' };
+        if (kind === 'keyword' && /^(notes?|study(ing)?|homework|work|projects?|class|course|learn(ing)?|review|docs?|documents?|files?|cod(e|ing)|assignment|tasks?|reading|research|writing|school|exam|test|practice)$/.test(pattern))
+          return { text: 'rejected: too generic; use a topic word from the goal (e.g. a concept or library name)' };
         await this.conn.reducers.saveRule({ sessionId: s.id, kind, pattern, verdict });
         return { text: `saved ${verdict} ${kind}:${pattern}` };
       }
@@ -406,9 +457,15 @@ Guidelines:
           reason = `Allowed (unsure, ${Math.round(confidence * 100)}%): ${reason}`;
           verdict = 'on_task';
         }
+        const seen = String(args.open_title ?? '').trim().slice(0, 200);
+        if (isContentApp(ev.app) && seen) {
+          this.seenTitles.set(ev.id.toString(), seen);
+          console.log(`[judge] on screen: ${ev.app} / "${seen}" (app reported "${ev.title.slice(0, 60)}")`);
+        }
         const fresh = this.conn.db.activityEvent.id.find(ev.id);
         if (fresh && fresh.verdict !== 'pending') return { text: `already decided: ${fresh.verdict}`, final: true };
         await this.conn.reducers.recordVerdict({ eventId: ev.id, verdict, reason, confidence });
+        console.log(`[judge] ${ev.app} / ${ev.title.slice(0, 60)} -> ${verdict} (${Math.round(confidence * 100)}%): ${reason}`);
         return { text: `recorded ${verdict} (${Math.round(confidence * 100)}%)`, final: true };
       }
       default:
@@ -451,7 +508,7 @@ Guidelines:
     const ivs = sessionInterventions(this.conn, sessionId).map((i) => ({
       shownMs: micros(i.shownAt),
       resolvedMs: i.resolvedAt ? micros(i.resolvedAt) : null,
-      alerted: i.alerted,
+      alerted: this.sentAlerts.has(i.id.toString()),
     }));
     return computeMetrics(events, ivs, micros(s.startedAt), end);
   }
@@ -487,92 +544,6 @@ Guidelines:
     await this.conn.reducers.saveSummary({ sessionId: s.id, metricsJson: JSON.stringify(m), text, sent: res.ok });
   }
 }
-
-// ---------------- Suggest (RAG over the session's resource folder) ----------------
-// Runs after the user has stayed on an on-task window for a few seconds.
-Agent.prototype.suggest = async function (this: Agent, job: Job) {
-  const self = this as any;
-  const index: ResourceIndex | undefined = self.extras.resources?.();
-  if (!index?.ready) {
-    await self.trace(job, 1, 'skip', '', 'no resource folder indexed for this session');
-    return;
-  }
-  const s = self.session(job) as Session;
-  const ev = self.conn.db.activityEvent.id.find(job.eventId) as Event | undefined;
-  if (!ev || s.status !== 'active' || s.latestEventId !== ev.id) return; // user already moved on
-
-  // 1. What is the user looking at? Browser: page text. Other apps: a short screen description.
-  let context = '';
-  if (ev.url) {
-    context = await fetchPageSummary(ev.url);
-    await self.trace(job, null, 'fetch_page_summary', JSON.stringify({ url: ev.url }), context.slice(0, 300));
-  } else if (self.capture) {
-    const shot: string | null = await self.capture();
-    if (shot) {
-      try {
-        const r = await self.llm(
-          [{ role: 'user', content: [
-            { type: 'text', text: 'In 2-3 sentences, describe what the user is reading or working on in the frontmost window. Name the specific topics, terms, functions or errors visible. No preamble.' },
-            { type: 'image_url', image_url: { url: shot } },
-          ] }],
-          { maxTokens: 200, timeoutMs: 45_000 }
-        );
-        context = r.content.trim();
-        await self.trace(job, null, 'describe_screen', JSON.stringify({ app: ev.app }), context.slice(0, 300));
-      } catch (err: any) {
-        await self.trace(job, null, 'describe_screen', '', `failed: ${String(err?.message ?? err).slice(0, 120)}`);
-      }
-    }
-  }
-  const query = `${ev.app}: ${ev.title}${ev.url ? ` (${ev.url})` : ''}\n${context}\nGoal: ${s.goal}`.slice(0, 4000);
-
-  // 2. Retrieve passages with Nemotron embeddings, best passage per file.
-  const hits = await index.search(query, 16);
-  const byFile = new Map<string, (typeof hits)[number]>();
-  for (const h of hits) if (!byFile.has(h.path)) byFile.set(h.path, h);
-  const candidates = [...byFile.values()].slice(0, 5);
-  await self.trace(job, null, 'search_resources', JSON.stringify({ query: query.slice(0, 160) }), candidates.map((c) => `${c.name} (${c.score.toFixed(2)})`).join(', ') || 'no matches');
-  if (!candidates.length) return;
-
-  // Don't repeat a file suggested in the last 10 minutes of this session.
-  const recent = new Set(
-    [...self.conn.db.suggestion.iter()]
-      .filter((x: any) => x.sessionId === s.id && Date.now() - micros(x.ts) < 10 * 60_000)
-      .map((x: any) => x.path)
-  );
-  const fresh = candidates.filter((c) => !recent.has(c.path));
-  if (!fresh.length) {
-    await self.trace(job, null, 'skip', '', 'best matches were already suggested recently');
-    return;
-  }
-
-  // 3. Nemotron decides which files actually help with what is on screen right now.
-  const list = fresh.map((c, i) => `[${i + 1}] ${c.name} (similarity ${c.score.toFixed(2)})\n${c.snippet.slice(0, 500)}`).join('\n\n');
-  let picks: { n: number; why: string }[] = [];
-  try {
-    const r = await self.llm(
-      [{
-        role: 'user',
-        content: `A student working toward "${s.goal}" is looking at:\n${ev.app}: ${ev.title}\n${context.slice(0, 800)}\n\nCandidate files from their own resource folder:\n\n${list}\n\nWhich files would genuinely help with what they are looking at right now? Pick at most 2, or none if nothing clearly helps. Return ONLY JSON: {"picks":[{"n":<number>,"why":"<under 90 characters, specific: what in the file helps>"}]}`,
-      }],
-      { maxTokens: 300 }
-    );
-    const j = extractJson(r.content);
-    if (Array.isArray(j?.picks)) picks = j.picks.filter((p: any) => Number.isInteger(p?.n) && p.n >= 1 && p.n <= fresh.length);
-    await self.trace(job, null, 'nemotron.pick', '', picks.length ? picks.map((p) => `${fresh[p.n - 1].name}: ${p.why}`).join(' | ') : 'nothing clearly helpful');
-  } catch (err: any) {
-    // LLM down: fall back to the single strongest match if it is clearly similar.
-    if (fresh[0].score >= 0.45) picks = [{ n: 1, why: 'Closest match in your resources' }];
-    await self.trace(job, null, 'nemotron.pick', '', `failed (${String(err?.message ?? err).slice(0, 80)}); ${picks.length ? 'using top match' : 'no suggestion'}`);
-  }
-  if (!picks.length) return;
-  const items = picks.slice(0, 2).map((p) => {
-    const c = fresh[p.n - 1];
-    return { path: c.path, name: c.name, why: String(p.why || '').slice(0, 140), score: c.score };
-  });
-  await self.conn.reducers.saveSuggestions({ sessionId: s.id, eventId: ev.id, items });
-  self.extras.notify?.(items);
-};
 
 function fallbackProfile(goal: string) {
   const stop = new Set(['finish', 'complete', 'assignment', 'homework', 'about', 'which', 'their', 'there', 'these', 'study', 'write', 'working']);

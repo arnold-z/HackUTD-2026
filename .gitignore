@@ -3,3 +3,6 @@ dist
 .env
 server/dist
 release
+
+debugging.md
+presentation.md

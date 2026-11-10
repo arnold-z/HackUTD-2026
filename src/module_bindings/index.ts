@@ -37,8 +37,10 @@ import {
 import AppendTraceReducer from "./append_trace_reducer";
 import EndSessionReducer from "./end_session_reducer";
 import LogActivityReducer from "./log_activity_reducer";
+import PauseSessionReducer from "./pause_session_reducer";
 import RecordVerdictReducer from "./record_verdict_reducer";
 import RequestSuggestionsReducer from "./request_suggestions_reducer";
+import ResumeSessionReducer from "./resume_session_reducer";
 import SaveProfileReducer from "./save_profile_reducer";
 import SaveResourceDocsReducer from "./save_resource_docs_reducer";
 import SaveRuleReducer from "./save_rule_reducer";
@@ -57,6 +59,7 @@ import InterventionRow from "./intervention_table";
 import RelevanceRuleRow from "./relevance_rule_table";
 import ResourceDocRow from "./resource_doc_table";
 import SessionRow from "./session_table";
+import SessionPauseRow from "./session_pause_table";
 import SessionSummaryRow from "./session_summary_table";
 import SuggestionRow from "./suggestion_table";
 
@@ -162,6 +165,17 @@ const tablesSchema = __schema({
       { name: 'session_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, SessionRow),
+  sessionPause: __table({
+    name: 'session_pause',
+    indexes: [
+      { accessor: 'sessionId', name: 'session_pause_session_id_idx_btree', algorithm: 'btree', columns: [
+        'sessionId',
+      ] },
+    ],
+    constraints: [
+      { name: 'session_pause_session_id_key', constraint: 'unique', columns: ['sessionId'] },
+    ],
+  }, SessionPauseRow),
   sessionSummary: __table({
     name: 'session_summary',
     indexes: [
@@ -194,8 +208,10 @@ const reducersSchema = __reducers(
   __reducerSchema("append_trace", AppendTraceReducer),
   __reducerSchema("end_session", EndSessionReducer),
   __reducerSchema("log_activity", LogActivityReducer),
+  __reducerSchema("pause_session", PauseSessionReducer),
   __reducerSchema("record_verdict", RecordVerdictReducer),
   __reducerSchema("request_suggestions", RequestSuggestionsReducer),
+  __reducerSchema("resume_session", ResumeSessionReducer),
   __reducerSchema("save_profile", SaveProfileReducer),
   __reducerSchema("save_resource_docs", SaveResourceDocsReducer),
   __reducerSchema("save_rule", SaveRuleReducer),

@@ -1,6 +1,6 @@
 // Anchor Electron main process.
-import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences, shell, desktopCapturer, Notification } from 'electron';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { app, BrowserWindow, ipcMain, screen, dialog, Tray, Menu, nativeImage, nativeTheme, systemPreferences, shell, desktopCapturer } from 'electron';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, config } from './config.js';
 import { connect, activeSession, latestSession, micros, openIntervention, sessionEvents, sessionRules, type Conn } from './db.js';
@@ -8,12 +8,33 @@ import { getFrontWindow, activateWindow, type FrontWindow } from './mac.js';
 import { Agent, isContentApp } from './agent.js';
 import { captureScreenForModel, screenFingerprint, fingerprintDiff, screenAccess } from './capture.js';
 import { initPhoton, photonStatus, photonError, stopPhoton } from './photon.js';
-import { ResourceIndex } from './rag.js';
-import { embedStatus } from './llm.js';
+import { chat } from './llm.js';
 
 const RENDERER = join(ROOT, 'renderer');
 const PRELOAD = join(ROOT, 'renderer', 'preload.cjs');
 const END_PHRASE = 'i am done focusing';
+
+// ---------------- Settings (remembered across sessions) ----------------
+type NotesBack = 'main' | 'separate' | 'ask';
+type Settings = { notesBack: NotesBack };
+const DEFAULT_SETTINGS: Settings = { notesBack: 'main' };
+const settingsFile = () => join(app.getPath('userData'), 'settings.json');
+let settings: Settings = { ...DEFAULT_SETTINGS };
+function loadSettings() {
+  try {
+    settings = { ...DEFAULT_SETTINGS, ...JSON.parse(readFileSync(settingsFile(), 'utf8')) };
+  } catch {
+    settings = { ...DEFAULT_SETTINGS };
+  }
+  if (!['main', 'separate', 'ask'].includes(settings.notesBack)) settings.notesBack = 'main';
+}
+function saveSettings() {
+  try {
+    writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+  } catch (err: any) {
+    console.error('[settings] could not save', err?.message ?? err);
+  }
+}
 
 let conn: Conn | undefined;
 let agent: Agent | undefined;
@@ -40,10 +61,6 @@ let candidateSince = 0;
 let contentCandidate: Uint8Array | null = null;
 let contentSince = 0;
 const FP_CHANGE = 0.02; // share of pixels that must change to count as different content (another note)
-// Resource folder (RAG) for the current session.
-let resources: ResourceIndex | undefined;
-let resourcesForSession: bigint | undefined;
-let suggestedForEvent: bigint | undefined;
 let lastOnTask: { app: string; pid: number; url: string; title: string; noteId?: string } | undefined;
 
 // Where "Back" should go: the most recent window whose *latest* verdict is still on task, never
@@ -58,15 +75,25 @@ function backTarget(): typeof lastOnTask {
   const currentKey = current ? keyOf(current) : '';
   const latestByKey = new Map<string, (typeof events)[number]>();
   for (const e of events) latestByKey.set(keyOf(e), e); // events are oldest -> newest
-  let fallback: (typeof events)[number] | undefined;
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     const k = keyOf(e);
     if (k === currentKey || latestByKey.get(k) !== e || e.verdict !== 'on_task') continue;
-    if (e.confidence >= 0.6) return toTarget(e);
-    fallback ??= e;
+    // Only places the agent was sure about: no "allowed because unsure" or blind guesses.
+    if (e.confidence < 0.6 || /^Allowed \(unsure/.test(e.reason)) continue;
+    if (e.app === 'Notes') {
+      // Notes can report a stale note name, so only trust the title Nemotron read on screen.
+      const seen = agent?.seenTitles.get(e.id.toString());
+      if (!seen) continue;
+      const curSeen = current ? agent?.seenTitles.get(current.id.toString()) : undefined;
+      if (curSeen && curSeen === seen) continue; // that's the note being blocked
+      return { app: 'Notes', title: seen, url: '', pid: pidByKey.get(k) ?? 0, noteId: undefined };
+    }
+    // Same name as the blocked window is ambiguous: skip it.
+    if (current && e.app === current.app && e.title === current.title) continue;
+    return toTarget(e);
   }
-  return fallback ? toTarget(fallback) : undefined;
+  return undefined; // nothing safe: "Back to work" opens Anchor instead
 }
 function toTarget(e: { app: string; title: string; url: string }) {
   const k = keyOf(e);
@@ -75,6 +102,69 @@ function toTarget(e: { app: string; title: string; url: string }) {
 const noteIdByKey = new Map<string, string>(); // Apple Notes: window key -> note id, for Back
 
 const keyOf = (w: { app: string; title: string; url: string }) => `${w.app}\u0001${w.title}\u0001${w.url}`;
+
+// ---------------- Pause ----------------
+function pauseInfo(sessionId: bigint) {
+  const p = conn?.db.sessionPause.sessionId.find(sessionId);
+  const pausedAtMs = p?.pausedAt ? micros(p.pausedAt) : null;
+  const finishedMs = p ? Number(p.pausedMicros / 1000n) : 0;
+  return { paused: pausedAtMs !== null, pausedAtMs, pausedMs: finishedMs + (pausedAtMs !== null ? Date.now() - pausedAtMs : 0), finishedMs };
+}
+function remainingMs(s: { id: bigint; minutes: number; startedAt: { microsSinceUnixEpoch: bigint } }) {
+  return s.minutes * 60000 - (Date.now() - micros(s.startedAt) - pauseInfo(s.id).pausedMs);
+}
+
+// Pausing costs effort: the user must type a ~100-word paragraph about their goal.
+let pauseChallenge = '';
+const normalizeTyping = (t: string) =>
+  t.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[\u2013\u2014]/g, '-').replace(/\s+/g, ' ').trim().toLowerCase();
+
+function cleanParagraph(text: string) {
+  let t = text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D"]/g, '').replace(/[\u2013\u2014]/g, ', ').replace(/[*_#`>\[\]]/g, '');
+  t = t.replace(/[^A-Za-z0-9 ,.'?!;:-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = t.split(' ');
+  if (words.length > 110) t = words.slice(0, 100).join(' ').replace(/[,;:]$/, '') + '.';
+  return t;
+}
+
+function fallbackParagraph(goal: string) {
+  const g = goal.replace(/[^A-Za-z0-9 ,.'-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const pool = [
+    `I started this session to work on ${g}, and stopping now should be a real choice.`,
+    'Every pause has a cost, because getting back into deep work takes time and energy.',
+    'Before I step away, I want to remember exactly where I left off and what comes next.',
+    'Small breaks are healthy when they are planned, but drifting away is not the same thing.',
+    'When I return, I will reopen the same window and finish the next small step first.',
+    'Focus is a skill that grows each time I choose the task in front of me.',
+    'If this break is about avoiding something hard, I can break that hard part into smaller pieces.',
+    'Progress comes from steady minutes added together, not from waiting for the perfect mood.',
+    'I will drink some water, stretch for a moment, and then come back ready to continue.',
+    'Typing this slowly gives me one more chance to decide whether I really need to stop.',
+  ];
+  const out: string[] = [];
+  const bag = [...pool];
+  while (out.join(' ').split(' ').length < 95 && bag.length) out.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
+  return out.join(' ');
+}
+
+async function makePauseChallenge(goal: string) {
+  try {
+    const angle = ['a short story', 'a pep talk', 'a study tip', 'a plain explanation', 'a reflection'][Math.floor(Math.random() * 5)];
+    const r = await chat(
+      [{
+        role: 'user',
+        content: `Write ${angle} as ONE paragraph of exactly 100 words about this goal: "${goal}". Relate it to the goal's subject. Use plain everyday words, and only periods and commas for punctuation. No lists, quotes, numbers, symbols or markdown. Output only the paragraph.`,
+      }],
+      { maxTokens: 400, temperature: 0.9, timeoutMs: 20_000 }
+    );
+    const t = cleanParagraph(r.content);
+    const n = t.split(' ').length;
+    if (n >= 70 && n <= 130) return t;
+  } catch (err: any) {
+    console.error('[pause] paragraph generation failed:', err?.message ?? err);
+  }
+  return fallbackParagraph(goal);
+}
 
 // ---------------- Crash guard + log file ----------------
 // Any error is logged to ~/Library/Logs/Anchor/main.log and the app keeps running.
@@ -166,6 +256,7 @@ function showMain() {
   if (!mainWin || mainWin.isDestroyed()) createMainWindow();
   if (mainWin!.isMinimized()) mainWin!.restore();
   mainWin!.show();
+  app.focus({ steal: true }); // make Anchor the active app (menu bar shows "Anchor")
   mainWin!.focus();
 }
 
@@ -226,12 +317,23 @@ function updateTray() {
   let title = ' Anchor';
   let windowLabel = '';
   if (s) {
-    const left = s.minutes * 60000 - (Date.now() - micros(s.startedAt));
+    const left = remainingMs(s);
     const sec = Math.max(0, Math.floor(left / 1000));
     const clock = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
     const blocked = !!openIntervention(conn!, s.id);
+    const paused = pauseInfo(s.id).paused;
     const state: 'on' | 'off' | 'pending' = blocked || latest?.verdict === 'off_task' ? 'off' : latest?.verdict === 'pending' ? 'pending' : 'on';
-    title = ` ${state === 'on' ? 'On task' : state === 'off' ? 'Off task' : 'Checking'}  ${clock}`;
+    title = paused ? ` Paused  ${clock}` : ` ${state === 'on' ? 'On task' : state === 'off' ? 'Off task' : 'Checking'}  ${clock}`;
+    if (paused) {
+      if (trayAnimKey !== 'paused') {
+        trayAnimKey = 'paused';
+        if (trayAnimTimer) clearInterval(trayAnimTimer);
+        trayAnimTimer = undefined;
+        tray.setImage(trayImage('idleTemplate'));
+      }
+      tray.setTitle(title, { fontType: 'monospacedDigit' });
+      return;
+    }
     windowLabel = latest ? `${latest.app}${latest.title && latest.title !== latest.app ? ': ' + latest.title.slice(0, 50) : ''}` : '';
     // A new window (or a new verdict for it) replays the transition.
     const animKey = `${s.latestEventId}:${state}`;
@@ -291,7 +393,9 @@ function createOverlays() {
       webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false },
     });
     w.setAlwaysOnTop(true, 'screen-saver');
-    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    // skipTransformProcessType: without it Electron turns Anchor into a background "accessory"
+    // app (no menu bar, never frontmost), so macOS kept reporting the previous app as active.
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     w.on('close', (e) => {
       if (!allowQuit) e.preventDefault();
     });
@@ -311,7 +415,37 @@ function destroyOverlays() {
   overlays = [];
 }
 
+// ---- Text alert: only after the popup has stayed on screen for the full 10 seconds ----
+const ALERT_AFTER_MS = 10_000;
+let countdownStartedAt: number | undefined;
+let countdownTimer: NodeJS.Timeout | undefined;
+let alertedThisShowing = false;
+function startCountdown() {
+  if (countdownTimer) return; // already counting
+  countdownStartedAt = Date.now();
+  alertedThisShowing = false;
+  countdownTimer = setTimeout(() => {
+    countdownTimer = undefined;
+    const s = conn ? activeSession(conn) : undefined;
+    const iv = s && conn ? openIntervention(conn, s.id) : undefined;
+    if (!iv || !overlayVisible()) return;
+    console.log('[alert] popup stayed up for 10 s; texting');
+    alertedThisShowing = true;
+    agent?.sendAlertFor(iv.id);
+    pushState();
+  }, ALERT_AFTER_MS);
+  pushState();
+}
+function stopCountdown(why: string) {
+  if (!countdownTimer) return;
+  clearTimeout(countdownTimer);
+  countdownTimer = undefined;
+  countdownStartedAt = undefined;
+  console.log(`[alert] countdown cancelled (${why})`);
+}
+
 function showOverlay() {
+  startCountdown();
   if (!overlays.length || overlays.some((w) => w.isDestroyed())) createOverlays();
   for (const w of overlays) {
     w.setAlwaysOnTop(true, 'screen-saver');
@@ -332,6 +466,7 @@ function focusOverlay() {
 }
 
 function hideOverlay() {
+  stopCountdown('popup closed');
   for (const w of overlays) if (!w.isDestroyed()) w.hide();
   overlayShownFor = undefined;
 }
@@ -342,19 +477,58 @@ const overlayVisible = () => overlays.some((w) => !w.isDestroyed() && w.isVisibl
 function enforceFocus() {
   if (!conn || !overlayVisible() || Date.now() < graceUntil) return;
   const s = activeSession(conn);
-  if (!s || !openIntervention(conn, s.id)) return;
+  if (!s || pauseInfo(s.id).paused || !openIntervention(conn, s.id)) return;
   if (!lastFront || lastFront.pid === process.pid) return;
   if (Date.now() - lastLoggedAt < 800) return; // give the reducer a moment to resolve a return
   const latest = conn.db.activityEvent.id.find(s.latestEventId);
   if (latest && latest.verdict === 'on_task') return;
+  if (awaitingNewVerdict(s.id)) return; // you moved to another window that is still being judged
+  if (staleVerdict(s.id)) {
+    requestRecheck('focus guard');
+    return;
+  }
+  startCountdown(); // covered again after Back didn't land on task: a fresh 10 s
   focusOverlay();
+}
+
+// When you left the popup (Back, a switch, a grace period). A verdict older than this can't bring
+// the popup back: what's on screen now must be checked again first.
+let leftPopupAt = 0;
+let forceRecheck = false;
+function markLeftPopup() {
+  leftPopupAt = Date.now();
+}
+function staleVerdict(sessionId: bigint): boolean {
+  if (!conn) return false;
+  const s = conn.db.session.id.find(sessionId);
+  const latest = s ? conn.db.activityEvent.id.find(s.latestEventId) : undefined;
+  return !!latest && micros(latest.ts) < leftPopupAt;
+}
+function requestRecheck(why: string) {
+  if (forceRecheck) return;
+  forceRecheck = true;
+  console.log(`[overlay] not re-showing an old verdict (${why}); checking the current window again`);
+}
+
+// The block is for window X, but you've since moved to window Y and its verdict isn't in yet.
+// Don't cover Y with X's message (and don't let the judge's screenshot capture the overlay):
+// wait for Y's verdict, which either clears the block or re-shows it for Y.
+function awaitingNewVerdict(sessionId: bigint): boolean {
+  if (!conn) return false;
+  const s = conn.db.session.id.find(sessionId);
+  const iv = openIntervention(conn, sessionId);
+  if (!s || !iv) return false;
+  const latest = conn.db.activityEvent.id.find(s.latestEventId);
+  return !!latest && latest.id !== iv.eventId && latest.verdict === 'pending';
 }
 
 // ---------------- Watcher ----------------
 async function tick() {
   if (!conn) return;
   const s = activeSession(conn);
-  if (!s) return;
+  if (!s || pauseInfo(s.id).paused) return; // paused: nothing is watched or judged
+  // Anchor's own window in front: always allowed, nothing to judge.
+  if (mainWin && !mainWin.isDestroyed() && mainWin.isFocused()) return;
   let w: FrontWindow;
   try {
     w = await getFrontWindow();
@@ -374,7 +548,15 @@ async function tick() {
   if (w.noteId) noteIdByKey.set(key, w.noteId);
   let relog = false;
   const now = Date.now();
-  if (key !== lastKey) {
+  if (forceRecheck) {
+    // Re-judge whatever is on screen now instead of reusing the verdict from before.
+    forceRecheck = false;
+    relog = true;
+    lastKey = key;
+    candidateKey = key;
+    baselineFp = null;
+    contentCandidate = null;
+  } else if (key !== lastKey) {
     // Only judge a window once it has stayed put for SETTLE_MS (passing through the Notes list
     // on the way from note A to note B doesn't count). Shorter while blocked, so going back is quick.
     const settle = openIntervention(conn, s.id) ? SETTLE_BLOCKED_MS : SETTLE_MS;
@@ -417,53 +599,13 @@ async function tick() {
   if (relog) {
     lastLoggedAt = Date.now();
     try {
+      console.log(`[watcher] now on: ${w.app} / ${w.title.slice(0, 60)}`);
       await conn.reducers.logActivity({ sessionId: s.id, app: w.app, title: w.title.slice(0, 300), url: w.url.slice(0, 1000) });
     } catch (err: any) {
       console.error('[watcher] logActivity failed', err?.message ?? err);
     }
   }
-  maybeSuggest(s.id);
   enforceFocus();
-}
-
-// After the user has stayed on an on-task window for a few seconds, ask the agent which files
-// from the session's resource folder could help with it (once per window).
-function maybeSuggest(sessionId: bigint) {
-  if (!conn || !resources?.ready || resourcesForSession !== sessionId) return;
-  const s = conn.db.session.id.find(sessionId);
-  if (!s || s.latestEventId === suggestedForEvent || openIntervention(conn, sessionId)) return;
-  const latest = conn.db.activityEvent.id.find(s.latestEventId);
-  if (!latest || latest.verdict !== 'on_task' || Date.now() - lastLoggedAt < config.dwellMs) return;
-  if (candidateKey && candidateKey !== lastKey) return; // still moving between windows
-  suggestedForEvent = s.latestEventId;
-  conn.reducers.requestSuggestions({ sessionId, eventId: s.latestEventId }).catch((e) => console.error('[suggest]', e?.message ?? e));
-}
-
-function notifySuggestions(items: { path: string; name: string; why: string }[]) {
-  if (!items.length || !Notification.isSupported()) return;
-  const [first, ...rest] = items;
-  const n = new Notification({
-    title: rest.length ? `${items.length} files from your resources may help` : 'This file may help',
-    subtitle: first.name,
-    body: `${first.why}${rest.length ? `\nAlso: ${rest.map((r) => r.name).join(', ')}` : ''}`,
-  });
-  n.on('click', () => {
-    if (resources?.has(first.path)) shell.openPath(first.path);
-  });
-  n.show();
-}
-
-async function startIndexing(sessionId: bigint, folder?: string, files?: string[]) {
-  resources = new ResourceIndex(join(app.getPath('userData'), 'embeddings'), pushState);
-  resourcesForSession = sessionId;
-  suggestedForEvent = undefined;
-  const results = folder ? await resources.indexFolder(folder) : await resources.indexFiles(files ?? []);
-  console.log(`[resources] ${resources.status.state}: ${resources.chunks.length} passages from ${results.filter((r) => r.status === 'indexed').length} files${resources.status.error ? ' (' + resources.status.error + ')' : ''}`);
-  if (folder && conn && results.length) {
-    const docs = results.map((r) => ({ path: r.path, name: r.name, chunks: r.chunks, status: r.status, detail: r.detail }));
-    for (let i = 0; i < docs.length; i += 50) await conn.reducers.saveResourceDocs({ sessionId, docs: docs.slice(i, i + 50) }).catch(() => {});
-  }
-  pushState();
 }
 
 function startWatcher() {
@@ -494,9 +636,23 @@ function onDbChange() {
     }
   }
   const iv = s ? openIntervention(conn, s.id) : undefined;
-  if (iv && overlayShownFor !== iv.id) {
+  if (iv && s && awaitingNewVerdict(s.id)) {
+    if (overlayVisible()) {
+      console.log('[overlay] hidden while the new window is judged');
+      stopCountdown('switched to another window');
+      markLeftPopup();
+      for (const w of overlays) if (!w.isDestroyed()) w.hide();
+    }
+    overlayShownFor = iv.id;
+  } else if (iv && overlayShownFor !== iv.id) {
     overlayShownFor = iv.id;
     showOverlay();
+  } else if (iv && s && !overlayVisible() && Date.now() >= graceUntil && conn.db.activityEvent.id.find(s.latestEventId)?.verdict === 'off_task') {
+    if (staleVerdict(s.id)) requestRecheck('popup hidden');
+    else {
+      console.log('[overlay] re-shown: current window judged off task');
+      showOverlay(); // the window you landed on was judged off task (a fresh verdict)
+    }
   } else if (!iv && overlayVisible()) {
     hideOverlay();
   }
@@ -525,6 +681,7 @@ function snapshot() {
     accent: accentColor(),
     defaultPhone: config.userPhone,
     endPhrase: END_PHRASE,
+    settings,
   };
   if (!conn) return { ...base, session: null };
   const s = activeSession(conn) ?? latestSession(conn);
@@ -564,6 +721,7 @@ function snapshot() {
       phone: s.phone,
       status: s.status,
       startedMs: micros(s.startedAt),
+      ...pauseInfo(s.id),
       endedMs: s.endedAt ? micros(s.endedAt) : null,
       profile,
       rules: sessionRules(conn, s.id).map((r) => ({ kind: r.kind, pattern: r.pattern, verdict: r.verdict, source: r.source })),
@@ -571,11 +729,11 @@ function snapshot() {
     current: latest ? evOut(latest) : null,
     events: events.slice(-25).reverse().map(evOut),
     intervention: iv
-      ? { id: iv.id.toString(), distraction: iv.distraction, reason: iv.reason, shownMs: micros(iv.shownAt), alerted: iv.alerted }
+      ? { id: iv.id.toString(), distraction: iv.distraction, reason: iv.reason, shownMs: countdownStartedAt ?? Date.now(), counting: !!countdownTimer, alerted: alertedThisShowing }
       : null,
     backTo: (() => {
       const b = backTarget();
-      return b ? { app: b.app, title: b.title, url: b.url } : null;
+      return b ? { app: b.app, title: b.title, url: b.url, isNote: b.app === 'Notes' } : null;
     })(),
     trace: traces.map((t) => ({
       id: t.id.toString(),
@@ -589,48 +747,40 @@ function snapshot() {
     })),
     metrics: agent ? agent.metricsFor(s.id) : null,
     summary: summary ? { text: summary.text, sent: summary.sent } : null,
-    resources:
-      resources && resourcesForSession === s.id
-        ? { ...resources.status, embedModel: embedStatus.model, embedError: embedStatus.ok ? '' : embedStatus.error }
-        : null,
-    suggestions: [...conn.db.suggestion.iter()]
-      .filter((x) => x.sessionId === s.id)
-      .sort((a, b) => (a.id < b.id ? 1 : -1))
-      .slice(0, 8)
-      .map((x) => ({ id: x.id.toString(), path: x.path, name: x.name, why: x.why, score: x.score, tsMs: micros(x.ts) })),
   };
 }
 
 // ---------------- IPC ----------------
-ipcMain.handle('start-session', async (_e, args: { goal: string; minutes: number; phone: string; folder?: string }) => {
+ipcMain.handle('start-session', async (_e, args: { goal: string; minutes: number; phone: string }) => {
   if (!conn) throw new Error('Not connected to SpacetimeDB yet');
   lastKey = '';
   lastOnTask = undefined;
-  const before = activeSession(conn)?.id;
   await conn.reducers.startSession({ goal: String(args.goal), minutes: Math.round(Number(args.minutes) || 30), phone: String(args.phone || config.userPhone) });
-  resources = undefined;
-  resourcesForSession = undefined;
-  if (args.folder) {
-    // Wait for the new session row, then index the folder in the background.
-    for (let i = 0; i < 40; i++) {
-      const s = activeSession(conn);
-      if (s && s.id !== before) {
-        startIndexing(s.id, String(args.folder));
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
   return true;
 });
 
-ipcMain.handle('pick-folder', async () => {
-  const r = await dialog.showOpenDialog(mainWin!, { properties: ['openDirectory'], title: 'Choose a folder of resources for this session' });
-  return r.canceled ? null : r.filePaths[0];
+ipcMain.handle('pause-challenge', async () => {
+  const s = conn ? activeSession(conn) : undefined;
+  if (!s) return null;
+  pauseChallenge = await makePauseChallenge(s.goal);
+  return pauseChallenge;
 });
 
-ipcMain.handle('open-resource', async (_e, path: string) => {
-  if (resources?.has(path)) await shell.openPath(path);
+ipcMain.handle('pause-submit', async (_e, typed: string) => {
+  const s = conn ? activeSession(conn) : undefined;
+  if (!s || !pauseChallenge) return { ok: false, reason: 'No pause in progress' };
+  if (normalizeTyping(String(typed)) !== normalizeTyping(pauseChallenge)) return { ok: false, reason: "That doesn't match the paragraph yet" };
+  pauseChallenge = '';
+  await conn!.reducers.pauseSession({ sessionId: s.id });
+  hideOverlay();
+  console.log('[pause] session paused');
+  return { ok: true };
+});
+
+ipcMain.handle('resume-session', async () => {
+  const s = conn ? activeSession(conn) : undefined;
+  if (s) await conn!.reducers.resumeSession({ sessionId: s.id });
+  lastKey = ''; // re-check whatever window is open now
   return true;
 });
 
@@ -644,14 +794,28 @@ ipcMain.handle('end-session', async (_e, args: { phrase: string }) => {
   return true;
 });
 
-ipcMain.handle('go-back', async () => {
+ipcMain.handle('set-setting', (_e, args: { key: string; value: string }) => {
+  if (args?.key === 'notesBack' && ['main', 'separate', 'ask'].includes(args.value)) {
+    settings.notesBack = args.value as NotesBack;
+    saveSettings();
+    console.log('[settings] notesBack =', settings.notesBack);
+  }
+  pushState();
+  return settings;
+});
+
+ipcMain.handle('go-back', async (_e, args?: { separate?: boolean }) => {
+  stopCountdown('clicked Back');
   const target = backTarget();
+  // How to reopen a note: the user's saved choice, or the button they picked on the block screen.
+  const separate = settings.notesBack === 'ask' ? !!args?.separate : settings.notesBack === 'separate';
+  console.log('[go-back] target:', target ? `${target.app} / ${target.title}${target.noteId ? ' (note ' + target.noteId.slice(-12) + ')' : ''}` : 'none (Anchor window)');
   const s = conn ? activeSession(conn) : undefined;
   const offEvent = s && conn ? conn.db.activityEvent.id.find(s.latestEventId) : undefined;
   if (offEvent && isContentApp(offEvent.app)) contentGrace();
   else hideOverlayTemporarily();
   try {
-    if (target) await activateWindow(target);
+    if (target) await activateWindow(target, { separate });
     else showMain();
   } catch (err: any) {
     console.error('[go-back]', err?.message ?? err);
@@ -690,6 +854,8 @@ ipcMain.handle('restart-app', () => {
 let graceUntil = 0;
 function contentGrace() {
   graceUntil = Date.now() + 8000;
+  stopCountdown('went back');
+  markLeftPopup();
   lastFpAt = 0; // check content on the next tick
   for (const w of overlays) if (!w.isDestroyed()) w.hide();
   // Fingerprint the off-task content right away so a quick switch to another note registers.
@@ -707,7 +873,18 @@ function contentGrace() {
       return;
     }
     graceUntil = 0;
-    showOverlay();
+    // Only cover the screen again for a window that was actually judged off task, never
+    // because a judgment of the window you went back to is still running.
+    if (latest && latest.verdict === 'off_task') {
+      if (staleVerdict(s.id)) {
+        requestRecheck('grace over');
+        setTimeout(check, 1000);
+        return;
+      }
+      console.log(`[overlay] grace over, still off task: ${latest.app} / ${latest.title.slice(0, 60)}`);
+      showOverlay();
+    }
+    else if (latest?.verdict === 'pending') setTimeout(check, 1000);
   };
   setTimeout(check, 1000);
 }
@@ -715,12 +892,19 @@ function contentGrace() {
 // Lower the overlay briefly so the restored window can take focus; if the user doesn't
 // land on an on-task window, enforceFocus() raises it again on the next tick.
 function hideOverlayTemporarily() {
+  markLeftPopup();
   for (const w of overlays) if (!w.isDestroyed()) w.setAlwaysOnTop(false);
   lastLoggedAt = Date.now();
   setTimeout(() => {
     if (!conn) return;
     const s = activeSession(conn);
     if (s && openIntervention(conn, s.id)) {
+      if (awaitingNewVerdict(s.id) || staleVerdict(s.id)) {
+        // Don't raise the old message: hide it until the current window has a fresh verdict.
+        for (const w of overlays) if (!w.isDestroyed()) w.hide();
+        if (!awaitingNewVerdict(s.id)) requestRecheck('after Back');
+        return;
+      }
       for (const w of overlays) if (!w.isDestroyed()) w.setAlwaysOnTop(true, 'screen-saver');
       enforceFocus();
     }
@@ -729,6 +913,7 @@ function hideOverlayTemporarily() {
 
 // ---------------- App lifecycle ----------------
 app.whenReady().then(() => {
+  loadSettings();
   // Our own Dock icon even when running unpackaged with `npm start`.
   try {
     app.dock?.setIcon(nativeImage.createFromPath(join(ROOT, 'build', 'icon.png')));
@@ -747,20 +932,27 @@ app.whenReady().then(() => {
   systemPreferences.on?.('accent-color-changed' as any, () => pushState());
   createMainWindow();
   createOverlays();
+  // Stay a regular foreground app (Dock icon, own menu bar, can be frontmost) even after the
+  // always-on-top overlays are set up, and come to the front at launch.
+  if (process.platform === 'darwin') {
+    try {
+      app.setActivationPolicy('regular');
+      app.dock?.show();
+    } catch {
+      /* ignore */
+    }
+  }
+  mainWin?.once('ready-to-show', () => showMain());
+  setTimeout(() => showMain(), 800);
+  app.on('activate', () => showMain());
   initPhoton()?.catch(() => pushState());
   conn = connect(
     // One saved identity per server+database, so switching between local and Maincloud just works.
     join(app.getPath('userData'), `stdb-token-${(config.stdbUri + '-' + config.stdbDatabase).replace(/[^a-z0-9]+/gi, '_')}`),
     (c) => {
-      agent = new Agent(c, pushState, captureScreenForModel, { resources: () => resources, notify: notifySuggestions });
-      // After a restart mid-session, rebuild the index from the files recorded for it (cached vectors make this quick).
-      const running = activeSession(c);
-      if (running) {
-        const files = [...c.db.resourceDoc.iter()].filter((d) => d.sessionId === running.id && d.status === 'indexed').map((d) => d.path);
-        if (files.length) startIndexing(running.id, undefined, files);
-      }
+      agent = new Agent(c, pushState, captureScreenForModel);
       agent.start();
-      const tables = [c.db.session, c.db.activityEvent, c.db.intervention, c.db.agentTrace, c.db.agentJob, c.db.relevanceRule, c.db.sessionSummary, c.db.suggestion, c.db.resourceDoc] as const;
+      const tables = [c.db.session, c.db.activityEvent, c.db.intervention, c.db.agentTrace, c.db.agentJob, c.db.relevanceRule, c.db.sessionSummary, c.db.sessionPause] as const;
       for (const t of tables) {
         (t as any).onInsert(() => onDbChange());
         (t as any).onUpdate?.(() => onDbChange());

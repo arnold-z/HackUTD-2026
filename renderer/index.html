@@ -22,6 +22,10 @@
       <div class="goal-block">
         <div class="goal" id="sGoal">Pick a goal to start</div>
         <div class="meta" id="sMeta"></div>
+        <div class="pause-row hidden" id="pauseRow">
+          <button id="pauseBtn" class="btn">Pause session</button>
+          <button id="resumeBtn" class="btn primary hidden">Resume session</button>
+        </div>
       </div>
       <div class="spacer"></div>
       <div id="endWrap" class="hidden">
@@ -50,6 +54,23 @@
           <p class="perm-note" id="permNote"></p>
         </div>
 
+        <div class="section" id="settings">
+          <h2>Settings</h2>
+          <div class="group">
+            <label class="row" for="notesBack">
+              <div class="main">
+                <div class="title">When I go back to a note</div>
+                <div class="detail">Where the Back button reopens an Apple Note</div>
+              </div>
+              <select id="notesBack" class="select">
+                <option value="main">Main Notes window</option>
+                <option value="separate">Its own window</option>
+                <option value="ask">Ask each time</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
         <!-- Start a session -->
         <section id="start" class="start">
           <h1>What are you finishing?</h1>
@@ -65,12 +86,6 @@
               <button data-min="60">1 hour</button>
             </div>
             <input id="minutes" type="number" min="1" max="600" value="25" aria-label="Minutes" />
-          </div>
-          <label class="field">Resources for this session <span class="optional">optional</span></label>
-          <div class="inline">
-            <button id="pickFolder" class="btn">Choose folder…</button>
-            <span class="folder" id="folderLabel">Notes, slides, PDFs or code that might help. Anchor suggests files when you stay on a window.</span>
-            <button id="clearFolder" class="btn hidden">Remove</button>
           </div>
           <label class="field" for="phone">Text alerts to</label>
           <input id="phone" type="tel" style="max-width: 240px" />
@@ -110,11 +125,6 @@
             </div>
           </div>
 
-          <div class="section hidden" id="resourcesSection">
-            <h2>Helpful files <small id="resStatus"></small></h2>
-            <div class="group" id="suggestions"></div>
-          </div>
-
           <div class="section">
             <h2>Agent activity <small id="latency"></small></h2>
             <div class="group trace trace-list" id="trace"></div>
@@ -132,6 +142,21 @@
         </section>
       </div>
     </main>
+  </div>
+
+  <!-- Pausing takes effort: type a generated paragraph about your goal. -->
+  <div class="modal hidden" id="pauseModal" role="dialog" aria-modal="true" aria-labelledby="pauseTitle">
+    <div class="sheet">
+      <h2 id="pauseTitle">Type this to pause</h2>
+      <p class="sheet-note">Copying and pasting is turned off. Capitals don't matter; the words and punctuation do.</p>
+      <div class="challenge" id="challenge">Writing a paragraph about your goal…</div>
+      <textarea id="pauseInput" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" disabled placeholder="Start typing the paragraph above"></textarea>
+      <div class="sheet-foot">
+        <span class="progress-note" id="pauseProgress"></span>
+        <button id="pauseCancel" class="btn">Keep focusing</button>
+        <button id="pauseConfirm" class="btn primary" disabled>Pause session</button>
+      </div>
+    </div>
   </div>
   <script src="app.js"></script>
 </body>

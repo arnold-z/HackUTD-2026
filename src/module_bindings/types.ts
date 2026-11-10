@@ -117,6 +117,13 @@ export const Session = __t.object("Session", {
 });
 export type Session = __Infer<typeof Session>;
 
+export const SessionPause = __t.object("SessionPause", {
+  sessionId: __t.u64(),
+  pausedAt: __t.option(__t.timestamp()),
+  pausedMicros: __t.u64(),
+});
+export type SessionPause = __Infer<typeof SessionPause>;
+
 export const SessionSummary = __t.object("SessionSummary", {
   sessionId: __t.u64(),
   metricsJson: __t.string(),

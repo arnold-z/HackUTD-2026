@@ -1,7 +1,7 @@
 // Smoke test: `npm run smoke` (add `-- --send` to also text USER_PHONE through Photon).
 // Checks the three outside dependencies before a demo: SpacetimeDB, Nemotron tool calling, Photon.
 import { config } from './main/config.js';
-import { chat, embed, embedStatus } from './main/llm.js';
+import { chat } from './main/llm.js';
 import { DbConnection } from './module_bindings/index.js';
 
 const send = process.argv.includes('--send');
@@ -77,19 +77,6 @@ async function checkLlm() {
   }
 }
 
-async function checkEmbed() {
-  console.log(`Embeddings (${config.embedModel})`);
-  try {
-    const [q] = await embed(['How does Dijkstra use a priority queue?'], 'query');
-    const [d] = await embed(['Dijkstra pops the closest node from a min-heap.'], 'passage');
-    let sim = 0;
-    for (let i = 0; i < q.length; i++) sim += q[i] * d[i];
-    ok(`${embedStatus.model}: ${q.length} dimensions, related-text similarity ${sim.toFixed(2)}`);
-  } catch (e: any) {
-    bad(`${e.message}. Set EMBED_MODEL in .env to the id shown on build.nvidia.com.`);
-  }
-}
-
 async function checkPhoton() {
   console.log('Photon / iMessage');
   if (!config.spectrumProjectId || !config.spectrumProjectSecret) return bad('SPECTRUM_PROJECT_ID / SECRET missing');
@@ -102,6 +89,5 @@ async function checkPhoton() {
 
 await checkDb();
 await checkLlm();
-await checkEmbed();
 await checkPhoton();
 process.exit(0);

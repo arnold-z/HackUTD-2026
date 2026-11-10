@@ -135,6 +135,16 @@ const suggestion = table(
   }
 );
 
+// Pause state per session: while pausedAt is set, nothing is judged and the timer is frozen.
+const sessionPause = table(
+  { name: 'session_pause', public: true },
+  {
+    sessionId: t.u64().primaryKey(),
+    pausedAt: t.option(t.timestamp()),
+    pausedMicros: t.u64(), // total paused time so far (finished pauses)
+  }
+);
+
 // Fires 10 s after an intervention is shown.
 const alertCheck = table(
   { name: 'alert_check' },
@@ -167,6 +177,7 @@ const spacetimedb = schema({
   sessionTimer,
   resourceDoc,
   suggestion,
+  sessionPause,
 });
 export default spacetimedb;
 
@@ -208,6 +219,9 @@ const BROWSERS = ['google chrome', 'safari', 'arc', 'brave browser', 'microsoft 
 // Most specific evidence wins: a keyword in the page title ("dijkstra") beats a whole-domain
 // rule (youtube.com), which beats an app rule. Ties go to off_task.
 function matchRule(ctx: Ctx, sessionId: bigint, ev: { app: string; title: string; url: string }) {
+  // Notes/docs/chat apps are always judged from a screenshot of what's open: their window title
+  // (or the note name Notes reports) can be stale, so a title keyword must not decide them.
+  if (isContentApp(ev.app)) return undefined;
   const host = hostOf(ev.url);
   const app = norm(ev.app);
   const isBrowser = BROWSERS.includes(app);
@@ -230,7 +244,8 @@ function matchRule(ctx: Ctx, sessionId: bigint, ev: { app: string; title: string
 
 // Reuse an earlier verdict for the exact same window in this session (instant "Back" button).
 function rememberedVerdict(ctx: Ctx, sessionId: bigint, ev: { app: string; title: string; url: string }) {
-  if (isContentApp(ev.app)) return undefined; // same title can hide a different note
+  // Same title can hide a different note (and Notes' reported selection can be stale): never reuse.
+  if (isContentApp(ev.app)) return undefined;
   let found: EventRow | undefined;
   for (const e of ctx.db.activityEvent.sessionId.filter(sessionId)) {
     if (e.verdict !== 'pending' && e.source === 'judge' && e.app === ev.app && e.title === ev.title && e.url === ev.url) {
@@ -328,7 +343,7 @@ export const logActivity = spacetimedb.reducer(
   { sessionId: t.u64(), app: t.string(), title: t.string(), url: t.string() },
   (ctx, { sessionId, app, title, url }) => {
     const s = ownedSession(ctx, sessionId);
-    if (s.status !== 'active') return;
+    if (s.status !== 'active' || isPaused(ctx, sessionId)) return;
     const hit = matchRule(ctx, sessionId, { app, title, url });
     const memo = hit ? undefined : rememberedVerdict(ctx, sessionId, { app, title, url });
     const decided = hit
@@ -343,6 +358,39 @@ export const logActivity = spacetimedb.reducer(
     applyVerdict(ctx, updated, ev);
   }
 );
+
+// ---------- Pause / resume ----------
+
+function isPaused(ctx: Ctx, sessionId: bigint) {
+  const p = ctx.db.sessionPause.sessionId.find(sessionId);
+  return !!p && p.pausedAt !== undefined;
+}
+
+// The app only calls this after the user typed the generated paragraph correctly.
+export const pauseSession = spacetimedb.reducer({ sessionId: t.u64() }, (ctx, { sessionId }) => {
+  const s = ownedSession(ctx, sessionId);
+  if (s.status !== 'active' || isPaused(ctx, sessionId)) return;
+  const open = openIntervention(ctx, sessionId);
+  if (open) ctx.db.intervention.id.update({ ...open, resolvedAt: ctx.timestamp });
+  // Freeze the time box: drop the pending end-of-session timer; resume schedules a new one.
+  for (const t of [...ctx.db.sessionTimer.iter()]) if (t.sessionId === sessionId) ctx.db.sessionTimer.scheduledId.delete(t.scheduledId);
+  const p = ctx.db.sessionPause.sessionId.find(sessionId);
+  if (p) ctx.db.sessionPause.sessionId.update({ ...p, pausedAt: ctx.timestamp });
+  else ctx.db.sessionPause.insert({ sessionId, pausedAt: ctx.timestamp, pausedMicros: 0n });
+});
+
+export const resumeSession = spacetimedb.reducer({ sessionId: t.u64() }, (ctx, { sessionId }) => {
+  const s = ownedSession(ctx, sessionId);
+  const p = ctx.db.sessionPause.sessionId.find(sessionId);
+  if (s.status !== 'active' || !p || p.pausedAt === undefined) return;
+  const now = ctx.timestamp.microsSinceUnixEpoch;
+  const pausedMicros = p.pausedMicros + (now - p.pausedAt.microsSinceUnixEpoch);
+  ctx.db.sessionPause.sessionId.update({ ...p, pausedAt: undefined, pausedMicros });
+  const used = now - s.startedAt.microsSinceUnixEpoch - pausedMicros;
+  let remaining = BigInt(s.minutes) * 60_000_000n - used;
+  if (remaining < 1_000_000n) remaining = 1_000_000n;
+  ctx.db.sessionTimer.insert({ scheduledId: 0n, scheduledAt: ScheduleAt.time(now + remaining), sessionId });
+});
 
 export const endSession = spacetimedb.reducer({ sessionId: t.u64() }, (ctx, { sessionId }) => {
   endSessionInternal(ctx, ownedSession(ctx, sessionId));
@@ -468,7 +516,7 @@ export const runAlertCheck = spacetimedb.reducer(
     const iv = ctx.db.intervention.id.find(timer.interventionId);
     if (!iv || iv.resolvedAt !== undefined || iv.alerted) return;
     const s = ctx.db.session.id.find(iv.sessionId);
-    if (!s || s.status !== 'active') return;
+    if (!s || s.status !== 'active' || isPaused(ctx, s.id)) return;
     ctx.db.intervention.id.update({ ...iv, alerted: true });
     queueJob(ctx, iv.sessionId, 'alert', iv.eventId, iv.id);
   }
